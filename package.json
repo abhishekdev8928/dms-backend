@@ -1,13 +1,15 @@
 {
   "type": "module",
   "scripts": {
-    "dev": "node --env-file=./.env.development index.js",
-    "prod": "node --env-file=./.env.production index.js"
+    "dev": "nodemon index.js",
+    "prod":"NODE_ENV=production index.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.911.0",
     "@aws-sdk/s3-request-presigner": "^3.911.0",
     "@tus/file-store": "^2.0.0",
+    "@tus/server": "^2.3.0",
+    "aws-sdk": "^2.1692.0",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
