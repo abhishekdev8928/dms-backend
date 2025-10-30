@@ -588,7 +588,7 @@ export const createNewVersionMetadata = async (req, res) => {
   try {
     const { id } = req.params;
     const { fileUrl, fileKey, fileSize, changes } = req.body;
-    const userId = req.user._id;
+    const userId = req.user.id;
     const userName = req.user.name;
 
     if (!fileUrl || !fileKey || !fileSize) {
@@ -804,3 +804,209 @@ export const updateDocumentPermissions = async (req, res) => {
     });
   }
 };
+
+
+
+
+// Add these imports at the top of your controller file:
+// import Document from '../models/Document.js';
+// import DocumentVersionModel from '../models/DocumentVersion.js';
+
+/**
+ * Get version history for a document
+ * Supports filtering by version number, date range, user, and pagination
+ */
+export const getDocumentVersionHistory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log(id)
+    const {
+
+      versionNumber,
+      startDate,
+      endDate,
+      uploadedBy,
+      page = 1,
+      limit = 10,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.query;
+
+    // Build query filters
+    const filters = { document: id };
+    
+    if (versionNumber) {
+      filters.versionNumber = parseInt(versionNumber);
+    }
+    
+    if (startDate || endDate) {
+      filters.createdAt = {};
+      if (startDate) filters.createdAt.$gte = new Date(startDate);
+      if (endDate) filters.createdAt.$lte = new Date(endDate);
+    }
+    
+    if (uploadedBy) {
+      filters.uploadedBy = uploadedBy;
+    }
+
+    // Calculate pagination
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const sortOptions = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+
+    // Fetch version history from database
+    // Assuming you have a DocumentVersion model
+    const versions = await DocumentVersionModel.find(filters)
+      .sort(sortOptions)
+      .skip(skip)
+      .limit(parseInt(limit))
+      .populate('uploadedBy', 'name email')
+      .lean();
+
+    const totalVersions = await DocumentVersionModel.countDocuments(filters);
+    console.log(totalVersions)
+
+    // Get current version info
+    const document = await DocumentModel.findById(id).select('currentVersion');
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        documentId: id,
+        currentVersion: document?.currentVersion,
+        versions: versions.map(v => ({
+          id: v._id,
+          versionNumber: v.versionNumber,
+          fileName: v.fileName,
+          fileSize: v.fileSize,
+          mimeType: v.mimeType,
+          s3Key: v.s3Key,
+          uploadedBy: v.uploadedBy,
+          uploadedAt: v.createdAt,
+          changeDescription: v.changeDescription,
+          isCurrentVersion: v.versionNumber === document?.currentVersion
+        })),
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages: Math.ceil(totalVersions / parseInt(limit)),
+          totalVersions,
+          limit: parseInt(limit)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching version history:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch version history',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Get specific version details
+ */
+export const getSpecificVersion = async (req, res) => {
+  try {
+    const { id, versionNumber } = req.params;
+
+    const version = await DocumentVersionModel.findOne({
+      documentId: id,
+      versionNumber: parseInt(versionNumber)
+    }).populate('uploadedBy', 'name email');
+
+    if (!version) {
+      return res.status(404).json({
+        success: false,
+        message: 'Version not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: version
+    });
+  } catch (error) {
+    console.error('Error fetching version:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch version',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Download a specific version
+ */
+export const downloadSpecificVersion = async (req, res) => {
+  try {
+    const { id, versionNumber } = req.params;
+
+    const version = await DocumentVersionModel.findOne({
+      documentId: id,
+      versionNumber: parseInt(versionNumber)
+    });
+
+    if (!version) {
+      return res.status(404).json({
+        success: false,
+        message: 'Version not found'
+      });
+    }
+
+    // Generate S3 presigned URL for download
+    // Assuming you have an S3 service
+    const downloadUrl = await s3Service.generatePresignedUrl(version.s3Key, 3600);
+
+    // Log the download
+    await DownloadLog.create({
+      documentId: id,
+      versionNumber: parseInt(versionNumber),
+      userId: req.user.id,
+      downloadedAt: new Date()
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        downloadUrl,
+        fileName: version.fileName,
+        expiresIn: 3600
+      }
+    });
+  } catch (error) {
+    console.error('Error downloading version:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to download version',
+      error: error.message
+    });
+  }
+};
+
+// ==================== USAGE EXAMPLES ====================
+/*
+
+1. Get all versions for a document:
+   GET /api/documents/{id}/versions
+
+2. Get versions with pagination:
+   GET /api/documents/{id}/versions?page=1&limit=20
+
+3. Filter by date range:
+   GET /api/documents/{id}/versions?startDate=2024-01-01&endDate=2024-12-31
+
+4. Filter by user who uploaded:
+   GET /api/documents/{id}/versions?uploadedBy=userId123
+
+5. Get specific version:
+   GET /api/documents/{id}/versions/3
+
+6. Download specific version:
+   GET /api/documents/{id}/versions/3/download
+
+7. Sorting options:
+   GET /api/documents/{id}/versions?sortBy=versionNumber&sortOrder=asc
+
+*/

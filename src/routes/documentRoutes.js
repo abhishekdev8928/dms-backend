@@ -7,7 +7,10 @@ import {
   updateDocumentMetadata,
   createNewVersionMetadata,
   deleteDocument,
-  updateDocumentPermissions
+  updateDocumentPermissions,
+  downloadSpecificVersion,
+  getSpecificVersion,
+  getDocumentVersionHistory
 } from '../controller/documentController.js';
 import {authenticateUser} from '../middleware/authMiddleware.js';
 import {
@@ -88,6 +91,28 @@ router.patch(
   updateDocumentPermissions
 );
 
+
+router.get(
+  '/:id/versions',
+  checkDocumentPermission('view'),
+  getDocumentVersionHistory
+);
+
+// Get specific version details
+// Requires view permission
+router.get(
+  '/:id/versions/:versionNumber',
+  checkDocumentPermission('view'),
+  getSpecificVersion
+);
+
+// Download specific version
+// Requires download permission
+router.get(
+  '/:id/versions/:versionNumber/download',
+  checkDocumentPermission('download'),
+  downloadSpecificVersion
+);
 
 router.post("/presigned-urls", authenticateUser, generatePresignedUrls);
 
