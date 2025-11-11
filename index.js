@@ -1,20 +1,21 @@
-
 import app from "./src/app.js";
-import { config } from "./src/config/config.js"
+import { config } from "./src/config/config.js";
 import { connectDb } from "./src/config/db.js";
 
+const startServer = async () => {
+  try {
+   
+    await connectDb();
 
+   
+    app.listen(config?.port, () => {
+      console.log(`🚀 Server is up & running on port ${config?.port}`);
+    });
 
-
-const startServer = async () =>{
-
-  app.listen(config?.port,()=>{
-    console.log(`Server is up & running on ${config?.port}`)
-  })
-
-}
-
-
-connectDb()
+  } catch (error) {
+    console.error("❌ Failed to connect to the database:", error.message);
+    process.exit(1);
+  }
+};
 
 startServer();
