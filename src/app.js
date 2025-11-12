@@ -125,7 +125,7 @@ const readLimiter = rateLimit({
 });
 
 
-app.use("/api/auth",  authRoutes);
+app.use("/api/auth",authLimiter,  authRoutes);
 
 app.use("/api/departments",  departmentRoutes);
 

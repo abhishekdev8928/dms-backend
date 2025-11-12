@@ -316,8 +316,8 @@ export const getChildFolders = async (req, res, next) => {
       
       // Populate createdBy and updatedBy for direct children
       await FolderModel.populate(children, [
-        { path: 'createdBy', select: 'email name' },
-        { path: 'updatedBy', select: 'email name' }
+        { path: 'createdBy', select: 'email username' },
+        { path: 'updatedBy', select: 'email username' }
       ]);
       
       console.log(`📦 Direct children only: ${children.length} items`);
@@ -466,8 +466,8 @@ async function getAllNestedChildren(folderId, includeDeleted = false) {
     
     // Populate createdBy and updatedBy
     await FolderModel.populate(children, [
-      { path: 'createdBy', select: 'email name' },
-      { path: 'updatedBy', select: 'email name' }
+      { path: 'createdBy', select: 'email username' },
+      { path: 'updatedBy', select: 'email username' }
     ]);
     
     console.log(`   Found ${children.length} direct children in this folder`);
