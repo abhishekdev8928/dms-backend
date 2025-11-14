@@ -1,0 +1,371 @@
+{
+    "success": true,
+    "data": [
+        {
+            "id": "691369e337555c5b75a5e51e",
+            "name": "Screenshot 2025-11-10 at 3.58.31 PM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/testing file/demo/Screenshot 2025-11-10 at 3.58.31 PM.pdf",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-12T03:09:58.676Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-12T03:09:58.676Z",
+            "size": 81315,
+            "description": null
+        },
+        {
+            "id": "6912e94c5106fb3e761d89e9",
+            "name": "terai-env",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/demo (1)/terai-env.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:45:09.482Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:45:09.482Z",
+            "size": 542365,
+            "description": null
+        },
+        {
+            "id": "6912f2a853dbc5be9359eac5",
+            "name": "demo22222",
+            "itemType": "folder",
+            "icon": "folder",
+            "path": "/aniket/demo (3)/demo22222",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:35:46.239Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:35:46.239Z",
+            "size": null,
+            "description": null
+        },
+        {
+            "id": "6912ab187421393add5a5d1b",
+            "name": "Screenshot 2025-11-10 at 1.36.03 PM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/testing file (1)/Screenshot 2025-11-10 at 1.36.03 PM.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:11:36.102Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:11:36.102Z",
+            "size": 87255,
+            "description": null
+        },
+        {
+            "id": "6912ab187421393add5a5d29",
+            "name": "Screenshot 2025-11-10 at 3.57.02 PM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/testing file (1)/Screenshot 2025-11-10 at 3.57.02 PM.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:11:36.102Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:11:36.102Z",
+            "size": 90006,
+            "description": null
+        },
+        {
+            "id": "6912ab187421393add5a5d3a",
+            "name": "Screenshot 2025-11-10 at 8.57.05 PM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/testing file (1)/Screenshot 2025-11-10 at 8.57.05 PM.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:11:36.102Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:11:36.102Z",
+            "size": 88382,
+            "description": null
+        },
+        {
+            "id": "6912ab187421393add5a5d4e",
+            "name": "Screenshot 2025-11-10 at 1.56.46 PM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/testing file (1)/Screenshot 2025-11-10 at 1.56.46 PM.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:11:36.102Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:11:36.102Z",
+            "size": 143442,
+            "description": null
+        },
+        {
+            "id": "6912ab187421393add5a5d5f",
+            "name": "Screenshot 2025-11-10 at 3.58.31 PM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/testing file (1)/Screenshot 2025-11-10 at 3.58.31 PM.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:11:36.102Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:11:36.102Z",
+            "size": 81315,
+            "description": null
+        },
+        {
+            "id": "6912ab187421393add5a5d70",
+            "name": "Screenshot 2025-11-09 at 10.27.29 PM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/testing file (1)/Screenshot 2025-11-09 at 10.27.29 PM.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:11:36.102Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:11:36.102Z",
+            "size": 88587,
+            "description": null
+        },
+        {
+            "id": "6912ab187421393add5a5d81",
+            "name": "Screenshot 2025-11-10 at 10.13.45 AM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/testing file (1)/Screenshot 2025-11-10 at 10.13.45 AM.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:11:36.102Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:11:36.102Z",
+            "size": 124866,
+            "description": null
+        },
+        {
+            "id": "6912ab187421393add5a5d92",
+            "name": "Screenshot 2025-11-09 at 10.05.38 PM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/testing file (1)/Screenshot 2025-11-09 at 10.05.38 PM.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:11:36.102Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:11:36.102Z",
+            "size": 159746,
+            "description": null
+        },
+        {
+            "id": "6912ab187421393add5a5da3",
+            "name": "Screenshot 2025-11-09 at 10.26.29 PM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/testing file (1)/Screenshot 2025-11-09 at 10.26.29 PM.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:11:36.102Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:11:36.102Z",
+            "size": 23659,
+            "description": null
+        },
+        {
+            "id": "6911fe2567cfd36651bb59cf",
+            "name": "testing file (1)",
+            "itemType": "folder",
+            "icon": "folder",
+            "path": "/aniket/testing file (1)",
+            "deletedBy": {
+                "name": "Unknown",
+                "email": "",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T10:11:36.097Z",
+            "daysUntilAutoDelete": 30,
+            "autoDeleteDate": "2025-12-11T10:11:36.097Z",
+            "size": null,
+            "description": null
+        },
+        {
+            "id": "6912a6687421393add5a597d",
+            "name": "Screenshot 2025-11-10 at 3.58.31 PM",
+            "itemType": "document",
+            "icon": "file",
+            "path": "/aniket/demo (1)/Screenshot 2025-11-10 at 3.58.31 PM.png",
+            "deletedBy": {
+                "id": "690f4020d920c84afe2e5070",
+                "name": "Unknown",
+                "email": "abhishek.sharma@digihost.in",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T03:09:14.726Z",
+            "daysUntilAutoDelete": 29,
+            "autoDeleteDate": "2025-12-11T03:09:14.726Z",
+            "size": 81315,
+            "description": null
+        },
+        {
+            "id": "69109a44ed6e6476c55f85f5",
+            "name": "demo",
+            "itemType": "folder",
+            "icon": "folder",
+            "path": "/aniket/akp/demo",
+            "deletedBy": {
+                "name": "Unknown",
+                "email": "",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T02:58:31.774Z",
+            "daysUntilAutoDelete": 29,
+            "autoDeleteDate": "2025-12-11T02:58:31.774Z",
+            "size": null,
+            "description": null
+        },
+        {
+            "id": "6911a6e9fd13cabebdae0d40",
+            "name": "demoooo",
+            "itemType": "folder",
+            "icon": "folder",
+            "path": "/aniket/akp/demoooo",
+            "deletedBy": {
+                "name": "Unknown",
+                "email": "",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T02:58:31.774Z",
+            "daysUntilAutoDelete": 29,
+            "autoDeleteDate": "2025-12-11T02:58:31.774Z",
+            "size": null,
+            "description": null
+        },
+        {
+            "id": "6911a719fd13cabebdae0d78",
+            "name": "welcome back",
+            "itemType": "folder",
+            "icon": "folder",
+            "path": "/aniket/akp/demoooo/welcome back",
+            "deletedBy": {
+                "name": "Unknown",
+                "email": "",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T02:58:31.774Z",
+            "daysUntilAutoDelete": 29,
+            "autoDeleteDate": "2025-12-11T02:58:31.774Z",
+            "size": null,
+            "description": null
+        },
+        {
+            "id": "6911a720fd13cabebdae0d8f",
+            "name": "welcome",
+            "itemType": "folder",
+            "icon": "folder",
+            "path": "/aniket/akp/demoooo/welcome",
+            "deletedBy": {
+                "name": "Unknown",
+                "email": "",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T02:58:31.774Z",
+            "daysUntilAutoDelete": 29,
+            "autoDeleteDate": "2025-12-11T02:58:31.774Z",
+            "size": null,
+            "description": null
+        },
+        {
+            "id": "6911a939fd13cabebdae0e60",
+            "name": "demo",
+            "itemType": "folder",
+            "icon": "folder",
+            "path": "/aniket/akp/demoooo/welcome/demo",
+            "deletedBy": {
+                "name": "Unknown",
+                "email": "",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T02:58:31.774Z",
+            "daysUntilAutoDelete": 29,
+            "autoDeleteDate": "2025-12-11T02:58:31.774Z",
+            "size": null,
+            "description": null
+        },
+        {
+            "id": "6911ac187cd520c3b943aaa9",
+            "name": "development",
+            "itemType": "folder",
+            "icon": "folder",
+            "path": "/aniket/akp/demoooo/welcome/demo/development",
+            "deletedBy": {
+                "name": "Unknown",
+                "email": "",
+                "avatar": null
+            },
+            "deletedAt": "2025-11-11T02:58:31.774Z",
+            "daysUntilAutoDelete": 29,
+            "autoDeleteDate": "2025-12-11T02:58:31.774Z",
+            "size": null,
+            "description": null
+        }
+    ],
+    "pagination": {
+        "page": 1,
+        "limit": 20,
+        "total": 35,
+        "totalPages": 2
+    },
+    "filters": {
+        "deletedBy": "anyone",
+        "type": "all",
+        "dateDeleted": "all",
+        "search": ""
+    },
+    "message": "Trash items retrieved successfully"
+}

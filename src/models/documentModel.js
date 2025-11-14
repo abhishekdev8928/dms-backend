@@ -1,7 +1,5 @@
 import mongoose from "mongoose";
 
-
-
 const documentSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -16,20 +14,31 @@ const documentSchema = new mongoose.Schema({
 
   type: {
     type: String,
-    default: "documents",
-    enum: ["documents"],
-    immutable: true
+    required: [true, 'Type is required'],
+    enum: [
+      'folder',
+      'pdf',
+      'document',
+      'spreadsheet',
+      'presentation',
+      'image',
+      'video',
+      'audio',
+      'zip',
+      'archive',
+      'code',
+      'other'
+    ],
+    lowercase: true
   },
 
   parent_id: {
     type: mongoose.Schema.Types.ObjectId,
     required: [true, 'Parent folder ID is required']
-    // ❌ removed "index: true" (handled below)
   },
 
   path: {
     type: String
-    // ❌ removed "index: true"
   },
 
   fileUrl: {
@@ -77,7 +86,6 @@ const documentSchema = new mongoose.Schema({
   isDeleted: {
     type: Boolean,
     default: false
-    // ❌ removed "index: true"
   },
   deletedAt: {
     type: Date,
@@ -99,32 +107,78 @@ const documentSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// ✅ Clean, no duplicate indexes
+// ✅ Indexes
 documentSchema.index({ parent_id: 1, isDeleted: 1 });
 documentSchema.index({ tags: 1 });
 documentSchema.index({ createdAt: -1 });
 documentSchema.index({ updatedAt: -1 });
 documentSchema.index({ extension: 1 });
 documentSchema.index({ mimeType: 1 });
-
-// 🧠 Use text index ONLY once, without separate { path: 1 } to avoid duplicates
 documentSchema.index({ name: "text", description: "text", path: "text" });
 
+// Helper method to determine type from MIME type
+documentSchema.statics.getTypeFromMimeType = function (mimeType, extension) {
+  const mimeTypeMap = {
+    'application/pdf': 'pdf',
+    'application/msword': 'document',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'document',
+    'text/plain': 'document',
+    'application/rtf': 'document',
+    'application/vnd.ms-excel': 'spreadsheet',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'spreadsheet',
+    'text/csv': 'spreadsheet',
+    'application/vnd.ms-powerpoint': 'presentation',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'presentation',
+
+    // image types
+    'image/jpeg': 'image',
+    'image/jpg': 'image',
+    'image/png': 'image',
+    'image/gif': 'image',
+    'image/webp': 'image',
+    'image/svg+xml': 'image',
+    'image/bmp': 'image',
+    'image/tiff': 'image',
+
+    // zip types
+    'application/zip': 'zip',
+    'application/x-zip-compressed': 'zip',
+    'application/x-rar-compressed': 'zip',
+    'application/x-7z-compressed': 'zip',
+    'application/gzip': 'zip',
+    'application/x-tar': 'zip'
+  };
+
+  // 1️⃣ Check MIME type FIRST (PNG → image)
+  if (mimeType && mimeTypeMap[mimeType]) {
+    return mimeTypeMap[mimeType];
+  }
+
+  // 2️⃣ If MIME fails, fallback to extension
+  if (extension) {
+    const ext = extension.toLowerCase().replace('.', '');
+
+    const zipExtensions = ['zip', 'rar', '7z', 'gz', 'tar'];
+    if (zipExtensions.includes(ext)) return 'zip';
+
+    const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'bmp', 'tiff', 'webp'];
+    if (imageExtensions.includes(ext)) return 'image';
+  }
+
+  return 'other';
+};
 
 
-// Virtual for formatted file size
+// Virtuals
 documentSchema.virtual('sizeFormatted').get(function() {
   const bytes = this.size;
   if (bytes === 0) return '0 Bytes';
-  
   const k = 1024;
   const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  
   return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
 });
 
-// Virtual for file type category
 documentSchema.virtual('fileCategory').get(function() {
   const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'webp'];
   const docExts = ['pdf', 'doc', 'docx', 'txt', 'rtf', 'odt'];
@@ -147,7 +201,6 @@ documentSchema.virtual('fileCategory').get(function() {
   return 'other';
 });
 
-// Virtual for display name with extension
 documentSchema.virtual('displayName').get(function() {
   if (this.name.endsWith(`.${this.extension}`)) {
     return this.name;
@@ -201,59 +254,78 @@ documentSchema.methods.getParentFolder = async function() {
   return FolderModel.findById(this.parent_id);
 };
 
-documentSchema.methods.createNewVersion = async function(
-  fileUrl, 
-  size, 
-  changeDescription, 
+// ✅ FIXED: Re-upload method - replaces ALL metadata with new file
+documentSchema.methods.reUpload = async function (
+  newFileData,
+  changeDescription,
+  userId
+) {
+  const DocumentVersionModel = mongoose.model("DocumentVersion");
+  const DocumentModel = mongoose.model("Document");
+
+  // ✅ Determine the type using your helper
+  const fileType = DocumentModel.getTypeFromMimeType(
+    newFileData.mimeType,
+    newFileData.extension
+  );
+
+  console.log("from here",fileType)
+
+  // ✅ Create a new version with correct type
+  const newVersion = await DocumentVersionModel.createNewVersion(
+    this._id,
+    {
+      ...newFileData,
+      type: fileType, // REQUIRED FIELD
+    },
+    changeDescription || "File re-uploaded",
+    userId
+  );
+
+  // ✅ Update main document metadata
+  this.name = newFileData.name;
+  this.originalName = newFileData.originalName;
+  this.fileUrl = newFileData.fileUrl;
+  this.size = newFileData.size;
+  this.mimeType = newFileData.mimeType;
+  this.extension = newFileData.extension;
+  this.type = fileType;                    // <-- Fix: document type updates
+  this.version = newVersion.versionNumber;
+  this.currentVersionId = newVersion._id;
+  this.updatedBy = userId;
+
+  await this.buildPath();
+  await this.save();
+
+  return newVersion;
+};
+
+
+
+// ✅ NEW: Rename method - only updates name, keeps file metadata
+documentSchema.methods.rename = async function(
+  newName,
   userId,
-  options = {},
   session = null
 ) {
   const DocumentVersionModel = mongoose.model('DocumentVersion');
   
-  // Find latest version to get the next version number
-  const latestVersion = await DocumentVersionModel.findOne({ documentId: this._id })
-    .sort({ versionNumber: -1 })
-    .session(session);
-  
-  const nextVersionNumber = latestVersion ? latestVersion.versionNumber + 1 : 1;
-  
-  // Each version can have its own identity - use provided values or fallback to document's current values
-  const versionData = {
-    documentId: this._id,
-    versionNumber: nextVersionNumber,
-    name: options.name || this.name,
-    originalName: options.originalName || this.originalName,
-    fileUrl: fileUrl,
-    size: size,
-    mimeType: options.mimeType || this.mimeType,
-    extension: options.extension || this.extension,
-    changeDescription: changeDescription,
-    pathAtCreation: this.path,
-    createdBy: userId,
-    isLatest: true // Will be managed by post-save hook
-  };
-  
-  const newVersion = await DocumentVersionModel.create([versionData], { session });
-  
-  // Update document's version counter and pointers
-  this.version = nextVersionNumber;
-  this.currentVersionId = newVersion[0]._id;
-  this.fileUrl = fileUrl;
-  this.size = size;
+  // Update Document name
+  this.name = newName;
   this.updatedBy = userId;
   
-  // Optionally update document's name if version has different name
-  if (options.name && options.name !== this.name) {
-    this.name = options.name;
-  }
-  if (options.originalName && options.originalName !== this.originalName) {
-    this.originalName = options.originalName;
-  }
-  
+  // Rebuild path
+  await this.buildPath();
   await this.save({ session });
   
-  return newVersion[0];
+  // Update ONLY the latest version's name
+  await DocumentVersionModel.updateLatestVersionName(
+    this._id,
+    newName,
+    session
+  );
+  
+  return this;
 };
 
 documentSchema.methods.getAllVersions = async function() {
@@ -272,6 +344,7 @@ documentSchema.methods.getVersion = async function(versionNumber) {
   });
 };
 
+// ✅ FIXED: Revert creates new version with old version's metadata
 documentSchema.methods.revertToVersion = async function(versionNumber, userId, session = null) {
   const DocumentVersionModel = mongoose.model('DocumentVersion');
   
@@ -284,10 +357,18 @@ documentSchema.methods.revertToVersion = async function(versionNumber, userId, s
     throw new Error(`Version ${versionNumber} not found`);
   }
   
-  // Create new version based on old version
-  return this.createNewVersion(
-    targetVersion.fileUrl,
-    targetVersion.size,
+  // Create new version based on old version's file
+  const revertedFileData = {
+    fileUrl: targetVersion.fileUrl,
+    size: targetVersion.size,
+    mimeType: targetVersion.mimeType,
+    extension: targetVersion.extension,
+    name: targetVersion.name,
+    originalName: targetVersion.originalName
+  };
+  
+  return this.reUpload(
+    revertedFileData,
     `Reverted to version ${versionNumber}`,
     userId,
     session
@@ -325,7 +406,6 @@ documentSchema.methods.softDelete = async function(session = null) {
   this.isDeleted = true;
   this.deletedAt = new Date();
   await this.save({ session });
-  
   return this;
 };
 
@@ -333,7 +413,6 @@ documentSchema.methods.restore = async function(session = null) {
   this.isDeleted = false;
   this.deletedAt = null;
   await this.save({ session });
-  
   return this;
 };
 
@@ -341,7 +420,6 @@ documentSchema.methods.addTags = async function(newTags, session = null) {
   const uniqueTags = [...new Set([...this.tags, ...newTags.map(t => t.toLowerCase().trim())])];
   this.tags = uniqueTags;
   await this.save({ session });
-  
   return this;
 };
 
@@ -349,7 +427,6 @@ documentSchema.methods.removeTags = async function(tagsToRemove, session = null)
   const tagsSet = new Set(tagsToRemove.map(t => t.toLowerCase().trim()));
   this.tags = this.tags.filter(tag => !tagsSet.has(tag));
   await this.save({ session });
-  
   return this;
 };
 
@@ -385,7 +462,7 @@ documentSchema.statics.findByPath = function(fullPath) {
   });
 };
 
-// Pre-save middleware
+// ✅ FIXED: Pre-save middleware - only rebuild path if parent changes
 documentSchema.pre('save', async function(next) {
   if (this.isNew && !this.extension && this.originalName) {
     const match = this.originalName.match(/\.([^.]+)$/);
@@ -398,10 +475,10 @@ documentSchema.pre('save', async function(next) {
     this.tags = [...new Set(this.tags.map(tag => tag.toLowerCase().trim()))];
   }
   
-  if (this.isModified('name') || this.isModified('extension') || this.isModified('parent_id')) {
-    if (!this.isNew || this.isModified('parent_id')) {
-      await this.buildPath();
-    }
+  // Only rebuild path if parent_id changes (move operation)
+  // Name changes are handled by rename() method
+  if (this.isModified('parent_id')) {
+    await this.buildPath();
   }
   
   next();

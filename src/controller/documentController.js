@@ -1,10 +1,6 @@
 /** 
- * Get document by ID
- * Route: GET /api/documents/:id
- * Access: Private
- * Params:
- *   - id: ObjectId (required)
- * Response: { success: true, data: { document, parent: { _id, name, type } } }
+ * FIXED DOCUMENT CONTROLLERS
+ * Based on existing Document and DocumentVersion models
  */
 import createHttpError from 'http-errors';
 import DocumentModel from '../models/documentModel.js';
@@ -12,7 +8,7 @@ import FolderModel from '../models/folderModel.js';
 import DepartmentModel from '../models/departmentModel.js';
 import ActivityLogModel from '../models/activityModel.js';
 import s3Client from '../config/s3Client.js';
-import { GetObjectCommand, DeleteObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../config/config.js';
 import DocumentVersionModel from '../models/documentVersionModel.js';
@@ -44,22 +40,11 @@ import {
 } from '../validation/documentValidation.js';
 
 /**
- * ============================================
- * DOCUMENT CONTROLLERS (WITH VALIDATION & SANITIZATION)
- * ============================================
- */
-
-/**
  * Generate presigned URLs for file upload
  * Route: POST /api/documents/generate-upload-urls
- * Access: Private
- * Body:
- *   - files: array of { filename: string, mimeType: string } (required, max 10)
- * Response: { success: true, data: [{ filename, key, url, mimeType }], message }
  */
 export const generatePresignedUrls = async (req, res, next) => {
   try {
-    // Validate request
     const parsed = generatePresignedUrlsSchema.safeParse({ body: req.body });
     validateRequest(parsed);
 
@@ -73,29 +58,19 @@ export const generatePresignedUrls = async (req, res, next) => {
     const timestamp = Date.now();
     const urls = await Promise.all(
       files.map(async (file, index) => {
-        // Sanitize inputs
         const filename = sanitizeInputWithXSS(file.filename);
         const mimeType = sanitizeInput(file.mimeType);
-
-        // Generate S3 key
         const key = `uploads/${timestamp}-${index}-${filename}`;
 
-        // Create PutObject command
         const command = new PutObjectCommand({
           Bucket: bucketName,
           Key: key,
           ContentType: mimeType,
         });
 
-        // Generate presigned URL (valid for 5 minutes)
         const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
 
-        return { 
-          filename, 
-          key, 
-          url: signedUrl, 
-          mimeType 
-        };
+        return { filename, key, url: signedUrl, mimeType };
       })
     );
 
@@ -111,119 +86,302 @@ export const generatePresignedUrls = async (req, res, next) => {
 };
 
 /**
- * Create/Upload a new document
+ * ✅ FIXED: Create/Upload a new document
  * Route: POST /api/documents
- * Access: Private
- * Body:
- *   - name: string (required, max 255 chars)
- *   - originalName: string (required, max 255 chars)
- *   - parent_id: ObjectId (required)
- *   - fileUrl: string (required, S3 key)
- *   - mimeType: string (required)
- *   - extension: string (required, pdf|docx|xlsx|jpg|jpeg|png|zip)
- *   - size: number (required, max 5GB)
- *   - description: string (optional, max 1000 chars)
- *   - tags: string[] (optional, max 20 tags)
- * Response: { success: true, message, data: { document, currentVersion } }
+ * RULE 1: First Upload
+ * - Create Document with initial metadata
+ * - Create DocumentVersion 1 with same metadata
  */
 export const createDocument = async (req, res, next) => {
   try {
-
-    console.log(req.body)
-    // Validate request
     const parsed = createDocumentSchema.safeParse({ body: req.body });
     validateRequest(parsed);
 
     const data = parsed.data.body;
     const createdBy = req.user.id;
 
-    // Sanitize all string inputs
     const sanitizedData = {
       name: sanitizeInputWithXSS(data.name),
       originalName: sanitizeInputWithXSS(data.originalName),
-      parent_id: sanitizeAndValidateId(data.parent_id, 'Parent ID'),
+      parent_id: sanitizeAndValidateId(data.parent_id, "Parent ID"),
       fileUrl: sanitizeInput(data.fileUrl),
       mimeType: sanitizeInput(data.mimeType),
       extension: sanitizeInput(data.extension),
       size: data.size,
-      description: data.description ? sanitizeInputWithXSS(data.description) : undefined,
-      tags: data.tags ? data.tags.map(tag => sanitizeInputWithXSS(tag)) : [],
-      createdBy
+      description: data.description
+        ? sanitizeInputWithXSS(data.description)
+        : undefined,
+      tags: data.tags ? data.tags.map((t) => sanitizeInputWithXSS(t)) : [],
+      createdBy,
     };
 
-    // Check parent exists
-    let parentFolder = await FolderModel.findById(sanitizedData.parent_id);
-    let parentDepartment = null;
-    let parentType = 'Folder';
-
-    if (!parentFolder) {
-      parentDepartment = await DepartmentModel.findById(sanitizedData.parent_id);
-      parentType = 'Department';
-      
-      if (!parentDepartment) {
-        throw createHttpError(404, 'Parent folder or department not found');
-      }
-    }
-
-    // Create document
-    const document = await DocumentModel.create(sanitizedData);
-    await document.buildPath();
-
-    // Create initial version (v1)
-    const initialVersion = await document.createNewVersion(
-      sanitizedData.fileUrl,
-      sanitizedData.size,
-      'Initial upload',
-      createdBy
+    sanitizedData.type = DocumentModel.getTypeFromMimeType(
+      sanitizedData.mimeType,
+      sanitizedData.extension
     );
 
-    // Log activity
+
+    console.log(sanitizedData.type)
+
+    let parent =
+      (await FolderModel.findById(sanitizedData.parent_id)) ||
+      (await DepartmentModel.findById(sanitizedData.parent_id));
+
+    if (!parent) throw createHttpError(404, "Parent folder/department not found");
+
+    // Create document
+    const document = new DocumentModel({
+      ...sanitizedData,
+      version: 1,
+    });
+
+    await document.buildPath();
+    await document.save();
+
+    // Create version
+   const initialVersion = await DocumentVersionModel.create({
+  documentId: document._id,
+  versionNumber: 1,
+  name: sanitizedData.name,
+  originalName: sanitizedData.originalName,
+  fileUrl: sanitizedData.fileUrl,
+  size: sanitizedData.size,
+  mimeType: sanitizedData.mimeType,
+  extension: sanitizedData.extension,
+  type: sanitizedData.type,     // 🔥 NEW
+  isLatest: true,
+  changeDescription: "Initial upload",
+  pathAtCreation: document.path,
+  createdBy,
+});
+
+
+
+    document.currentVersionId = initialVersion._id;
+    await document.save();
+
+    res.status(201).json({
+      success: true,
+      message: "Document uploaded successfully",
+      data: {
+        ...document.toObject(),
+        currentVersion: initialVersion,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
+/**
+ * Add tags to document
+ */
+export const addTags = async (req, res, next) => {
+  try {
+    const parsed = tagsOperationSchema.safeParse({ 
+      params: req.params,
+      body: req.body 
+    });
+    validateRequest(parsed);
+
+    const { id } = parsed.data.params;
+    const { tags } = parsed.data.body;
+    const userId = req.user.id;
+    
+    const sanitizedId = sanitizeAndValidateId(id, 'Document ID');
+    const sanitizedTags = tags.map(tag => sanitizeInputWithXSS(tag));
+
+    const document = await DocumentModel.findById(sanitizedId);
+    if (!document) {
+      throw createHttpError(404, 'Document not found');
+    }
+
+    await document.addTags(sanitizedTags);
+
     await ActivityLogModel.logActivity({
-      action: 'DOCUMENT_UPLOADED',
+      action: 'TAGS_ADDED',
       entityType: 'Document',
       entityId: document._id,
       entityName: document.name,
-      performedBy: createdBy,
+      performedBy: userId,
       performedByName: req.user.name,
       performedByEmail: req.user.email,
-      description: `Uploaded document "${document.displayName}"`,
-      metadata: {
-        fileSize: document.size,
-        mimeType: document.mimeType,
-        extension: document.extension,
-        path: document.path,
-        parentType: parentType,
-        versionNumber: initialVersion.versionNumber
-      },
+      description: `Added tags [${sanitizedTags.join(', ')}] to "${document.displayName}"`,
       ipAddress: req.ip,
       userAgent: req.get('user-agent')
     });
 
-    // Sanitize response
-    const responseData = sanitizeObjectXSS({
-      ...document.toObject(),
-      currentVersion: initialVersion
-    });
+    const responseData = sanitizeObjectXSS(document.toObject());
 
-    res.status(201).json({
+    res.status(200).json({
       success: true,
-      message: 'Document uploaded successfully',
+      message: 'Tags added successfully',
       data: responseData
     });
   } catch (error) {
-    console.error('Create document error:', error);
+    next(error);
+  }
+};
+
+/**
+ * Remove tags from document
+ */
+export const removeTags = async (req, res, next) => {
+  try {
+    const parsed = tagsOperationSchema.safeParse({ 
+      params: req.params,
+      body: req.body 
+    });
+    validateRequest(parsed);
+
+    const { id } = parsed.data.params;
+    const { tags } = parsed.data.body;
+    const userId = req.user.id;
+    
+    const sanitizedId = sanitizeAndValidateId(id, 'Document ID');
+    const sanitizedTags = tags.map(tag => sanitizeInputWithXSS(tag));
+
+    const document = await DocumentModel.findById(sanitizedId);
+    if (!document) {
+      throw createHttpError(404, 'Document not found');
+    }
+
+    const before = [...document.tags];
+    await document.removeTags(sanitizedTags);
+
+    await ActivityLogModel.logActivity({
+      action: 'TAGS_REMOVED',
+      entityType: 'Document',
+      entityId: document._id,
+      entityName: document.name,
+      performedBy: userId,
+      performedByName: req.user.name,
+      performedByEmail: req.user.email,
+      description: `Removed tags [${sanitizedTags.join(', ')}] from "${document.displayName}"`,
+      changes: { tags: { before, after: document.tags } },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent')
+    });
+
+    const responseData = sanitizeObjectXSS(document.toObject());
+
+    res.status(200).json({
+      success: true,
+      message: 'Tags removed successfully',
+      data: responseData
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Find documents by tags
+ */
+export const findByTags = async (req, res, next) => {
+  try {
+    const parsed = findByTagsSchema.safeParse({ query: req.query });
+    validateRequest(parsed);
+
+    const tagArray = parsed.data.query.tags;
+    const sanitizedTags = tagArray.map(tag => sanitizeInputWithXSS(tag));
+
+    const documents = await DocumentModel.find({ 
+      tags: { $in: sanitizedTags }, 
+      isDeleted: false 
+    })
+      .populate('createdBy', 'name email')
+      .populate('updatedBy', 'name email');
+
+    const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc.toObject()));
+
+    res.status(200).json({
+      success: true,
+      count: sanitizedDocuments.length,
+      data: sanitizedDocuments
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Find documents by extension
+ */
+export const findByExtension = async (req, res, next) => {
+  try {
+    const parsed = findByExtensionSchema.safeParse({ params: req.params });
+    validateRequest(parsed);
+
+    const { ext } = parsed.data.params;
+    const sanitizedExt = sanitizeInput(ext);
+
+    const documents = await DocumentModel.find({ 
+      extension: sanitizedExt, 
+      isDeleted: false 
+    }).populate('createdBy', 'name email');
+
+    const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc.toObject()));
+
+    res.status(200).json({
+      success: true,
+      count: sanitizedDocuments.length,
+      data: sanitizedDocuments
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get department statistics
+ */
+export const getDepartmentStats = async (req, res, next) => {
+  try {
+    const parsed = getDepartmentStatsSchema.safeParse({ params: req.params });
+    validateRequest(parsed);
+
+    const { departmentId } = parsed.data.params;
+    const sanitizedDeptId = sanitizeAndValidateId(departmentId, 'Department ID');
+
+    const department = await DepartmentModel.findById(sanitizedDeptId);
+    if (!department) {
+      throw createHttpError(404, 'Department not found');
+    }
+
+    const stats = await DocumentModel.aggregate([
+      { 
+        $match: { 
+          path: { $regex: `^/${department.name}/` }, 
+          isDeleted: false 
+        } 
+      },
+      {
+        $group: {
+          _id: '$extension',
+          totalSize: { $sum: '$size' },
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const sanitizedStats = sanitizeObjectXSS(stats);
+
+    res.status(200).json({
+      success: true,
+      data: sanitizedStats
+    });
+  } catch (error) {
     next(error);
   }
 };
 
 /**
  * Get document by ID
- * Route: GET /api/documents/:id
- * Access: Private
  */
 export const getDocumentById = async (req, res, next) => {
   try {
-    // Validate request
     const parsed = getDocumentByIdSchema.safeParse({ params: req.params });
     validateRequest(parsed);
 
@@ -274,7 +432,6 @@ export const getDocumentById = async (req, res, next) => {
       userAgent: req.get('user-agent')
     });
 
-    // Sanitize response
     const responseData = sanitizeObjectXSS({
       ...document.toJSON(),
       parent: parentInfo
@@ -290,18 +447,10 @@ export const getDocumentById = async (req, res, next) => {
 };
 
 /**
- * Get documents by parent (folder or department)
- * Route: GET /api/parents/:parentId/documents
- * Access: Private
- * Params:
- *   - parentId: ObjectId (required)
- * Query:
- *   - includeDeleted: 'true' | 'false' (optional)
- * Response: { success: true, count, parentType, data: [documents] }
+ * Get documents by parent
  */
 export const getDocumentsByParent = async (req, res, next) => {
   try {
-    // Validate request
     const parsed = getDocumentsByParentSchema.safeParse({ 
       params: req.params,
       query: req.query 
@@ -313,7 +462,6 @@ export const getDocumentsByParent = async (req, res, next) => {
     
     const sanitizedParentId = sanitizeAndValidateId(parentId, 'Parent ID');
 
-    // Check if parent is folder or department
     let parent = await FolderModel.findById(sanitizedParentId);
     let parentType = 'Folder';
     
@@ -332,7 +480,6 @@ export const getDocumentsByParent = async (req, res, next) => {
     ).populate('createdBy', 'name email')
       .populate('updatedBy', 'name email');
 
-    // Sanitize response
     const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc.toObject()));
 
     res.status(200).json({
@@ -346,28 +493,13 @@ export const getDocumentsByParent = async (req, res, next) => {
   }
 };
 
-/**
- * Get documents by folder (backward compatibility)
- * Route: GET /api/folders/:folderId/documents
- * Access: Private
- */
-export const getDocumentsByFolder = async (req, res, next) => {
-  return getDocumentsByParent(req, res, next);
-};
+export const getDocumentsByFolder = getDocumentsByParent;
 
 /**
  * Get recent documents
- * Route: GET /api/departments/:departmentId/documents/recent
- * Access: Private
- * Params:
- *   - departmentId: ObjectId (required)
- * Query:
- *   - limit: number (optional, default 10, max 100)
- * Response: { success: true, count, data: [documents] }
  */
 export const getRecentDocuments = async (req, res, next) => {
   try {
-    // Validate request
     const parsed = getRecentDocumentsSchema.safeParse({ 
       params: req.params,
       query: req.query 
@@ -379,19 +511,20 @@ export const getRecentDocuments = async (req, res, next) => {
     
     const sanitizedDepartmentId = sanitizeAndValidateId(departmentId, 'Department ID');
 
-    // Get department
     const department = await DepartmentModel.findById(sanitizedDepartmentId);
     if (!department) {
       throw createHttpError(404, 'Department not found');
     }
 
-    const documents = await DocumentModel.getRecentDocuments(
-      department.name,
-      limit
-    );
+    const documents = await DocumentModel.find({
+      path: new RegExp(`^/${department.name}/`),
+      isDeleted: false
+    })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .populate('createdBy', 'name email');
 
-    // Sanitize response
-    const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc));
+    const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc.toObject()));
 
     res.status(200).json({
       success: true,
@@ -404,94 +537,55 @@ export const getRecentDocuments = async (req, res, next) => {
 };
 
 /**
- * Update document details
+ * ✅ FIXED: Update document details
  * Route: PUT /api/documents/:id
- * Access: Private
- * Params:
- *   - id: ObjectId (required)
- * Body:
- *   - name: string (optional, max 255 chars)
- *   - description: string (optional, max 1000 chars, nullable)
- *   - tags: string[] (optional, max 20 tags)
- * Response: { success: true, message, data: document }
+ * RULE 3: Rename
+ * - If name changes: use rename() method
+ * - Other changes: update normally
  */
 export const updateDocument = async (req, res, next) => {
   try {
-    // Validate request
-    const parsed = updateDocumentSchema.safeParse({ 
+    const parsed = updateDocumentSchema.safeParse({
       params: req.params,
-      body: req.body 
+      body: req.body,
     });
     validateRequest(parsed);
 
     const { id } = parsed.data.params;
     const data = parsed.data.body;
     const updatedBy = req.user.id;
-    
-    const sanitizedId = sanitizeAndValidateId(id, 'Document ID');
 
-    const oldDocument = await DocumentModel.findById(sanitizedId);
-    if (!oldDocument) {
-      throw createHttpError(404, 'Document not found');
-    }
+    const document = await DocumentModel.findById(id);
+    if (!document) throw createHttpError(404, "Document not found");
 
-    // Sanitize inputs
-    const sanitizedData = {};
-    if (data.name) sanitizedData.name = sanitizeInputWithXSS(data.name);
-    if (data.description !== undefined) {
-      sanitizedData.description = data.description ? sanitizeInputWithXSS(data.description) : null;
-    }
-    if (data.tags) {
-      sanitizedData.tags = data.tags.map(tag => sanitizeInputWithXSS(tag));
-    }
-
-    // Track changes
     const changes = {};
-    if (sanitizedData.name && sanitizedData.name !== oldDocument.name) {
-      changes.name = { before: oldDocument.name, after: sanitizedData.name };
-    }
-    if (sanitizedData.description !== undefined && sanitizedData.description !== oldDocument.description) {
-      changes.description = { before: oldDocument.description, after: sanitizedData.description };
-    }
-    if (sanitizedData.tags && JSON.stringify(sanitizedData.tags) !== JSON.stringify(oldDocument.tags)) {
-      changes.tags = { before: oldDocument.tags, after: sanitizedData.tags };
+    let nameChanged = false;
+
+    if (data.name && data.name !== document.name) {
+      await document.rename(sanitizeInputWithXSS(data.name), updatedBy);
+      nameChanged = true;
     }
 
-    // Update document
-    Object.assign(oldDocument, sanitizedData);
-    oldDocument.updatedBy = updatedBy;
-    await oldDocument.save();
-
-    // ✅ Sync file name with document versions if document name changed
-    if (changes.name) {
-      await DocumentVersionModel.updateMany(
-        { documentId: oldDocument._id },
-        { $set: { filename: sanitizedData.name } }
-      );
+    if (data.description !== undefined && data.description !== document.description) {
+      const desc = data.description ? sanitizeInputWithXSS(data.description) : null;
+      changes.description = { before: document.description, after: desc };
+      document.description = desc;
     }
 
-    // Log activity
-    await ActivityLogModel.logActivity({
-      action: 'DOCUMENT_UPDATED',
-      entityType: 'Document',
-      entityId: oldDocument._id,
-      entityName: oldDocument.name,
-      performedBy: updatedBy,
-      performedByName: req.user.name,
-      performedByEmail: req.user.email,
-      description: `Updated document "${oldDocument.displayName}"`,
-      changes,
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent')
-    });
+    if (data.tags) {
+      const tags = data.tags.map((t) => sanitizeInputWithXSS(t));
+      document.tags = tags;
+    }
 
-    // Sanitize response
-    const responseData = sanitizeObjectXSS(oldDocument.toObject());
+    if (!nameChanged) {
+      document.updatedBy = updatedBy;
+      await document.save();
+    }
 
     res.status(200).json({
       success: true,
-      message: 'Document and versions updated successfully',
-      data: responseData
+      message: "Document updated successfully",
+      data: document.toObject(),
     });
   } catch (error) {
     next(error);
@@ -500,113 +594,37 @@ export const updateDocument = async (req, res, next) => {
 
 
 /**
- * Move document to another parent
- * Route: POST /api/documents/:id/move
- * Access: Private
- * Params:
- *   - id: ObjectId (required)
- * Body:
- *   - newParentId: ObjectId (required)
- * Response: { success: true, message, data: document }
+ * Move document
  */
 export const moveDocument = async (req, res, next) => {
   try {
-    // Validate request
-    const parsed = moveDocumentSchema.safeParse({ 
-      params: req.params,
-      body: req.body 
-    });
+    const parsed = moveDocumentSchema.safeParse({ params: req.params, body: req.body });
     validateRequest(parsed);
 
     const { id } = parsed.data.params;
     const { newParentId } = parsed.data.body;
-    const userId = req.user.id;
-    
-    const sanitizedId = sanitizeAndValidateId(id, 'Document ID');
-    const sanitizedParentId = sanitizeAndValidateId(newParentId, 'New Parent ID');
 
-    const document = await DocumentModel.findById(sanitizedId);
-    if (!document) {
-      throw createHttpError(404, 'Document not found');
-    }
+    const document = await DocumentModel.findById(id);
+    if (!document) throw createHttpError(404, "Document not found");
 
-    // Get old parent info
-    let oldParent = await FolderModel.findById(document.parent_id);
-    let oldParentName = 'Unknown';
-    let oldParentType = 'Folder';
-    
-    if (!oldParent) {
-      oldParent = await DepartmentModel.findById(document.parent_id);
-      oldParentType = 'Department';
-      if (oldParent) {
-        oldParentName = oldParent.name;
-      }
-    } else {
-      oldParentName = oldParent.name;
-    }
-
-    const oldPath = document.path;
-
-    // Move document
-    await document.moveTo(sanitizedParentId);
-
-    // Get new parent info
-    let newParent = await FolderModel.findById(sanitizedParentId);
-    let newParentName = 'Unknown';
-    let newParentType = 'Folder';
-    
-    if (!newParent) {
-      newParent = await DepartmentModel.findById(sanitizedParentId);
-      newParentType = 'Department';
-      if (newParent) {
-        newParentName = newParent.name;
-      }
-    } else {
-      newParentName = newParent.name;
-    }
-
-    // Log activity
-    await ActivityLogModel.logActivity({
-      action: 'DOCUMENT_MOVED',
-      entityType: 'Document',
-      entityId: document._id,
-      entityName: document.name,
-      performedBy: userId,
-      performedByName: req.user.name,
-      performedByEmail: req.user.email,
-      description: `Moved document "${document.displayName}" from "${oldParentName}" (${oldParentType}) to "${newParentName}" (${newParentType})`,
-      changes: {
-        parent_id: { before: oldParent?._id, after: sanitizedParentId },
-        path: { before: oldPath, after: document.path }
-      },
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent')
-    });
-
-    // Sanitize response
-    const responseData = sanitizeObjectXSS(document.toObject());
+    await document.moveTo(newParentId);
 
     res.status(200).json({
       success: true,
-      message: 'Document moved successfully',
-      data: responseData
+      message: "Document moved successfully",
+      data: document.toObject(),
     });
   } catch (error) {
     next(error);
   }
 };
 
+
 /**
  * Soft delete document
- * Route: DELETE /api/documents/:id
- * Access: Private
- * Params:
- *   - id: ObjectId (required)
- * Response: { success: true, message }
  */
 export const softDeleteDocument = async (req, res, next) => {
   try {
-    // Validate request
     const parsed = documentOperationSchema.safeParse({ params: req.params });
     validateRequest(parsed);
 
@@ -626,7 +644,6 @@ export const softDeleteDocument = async (req, res, next) => {
 
     await document.softDelete();
 
-    // Log activity
     await ActivityLogModel.logActivity({
       action: 'DOCUMENT_DELETED',
       entityType: 'Document',
@@ -651,15 +668,9 @@ export const softDeleteDocument = async (req, res, next) => {
 
 /**
  * Restore deleted document
- * Route: POST /api/documents/:id/restore
- * Access: Private
- * Params:
- *   - id: ObjectId (required)
- * Response: { success: true, message, data: document }
  */
 export const restoreDocument = async (req, res, next) => {
   try {
-    // Validate request
     const parsed = documentOperationSchema.safeParse({ params: req.params });
     validateRequest(parsed);
 
@@ -679,7 +690,6 @@ export const restoreDocument = async (req, res, next) => {
 
     await document.restore();
 
-    // Log activity
     await ActivityLogModel.logActivity({
       action: 'DOCUMENT_RESTORED',
       entityType: 'Document',
@@ -693,7 +703,6 @@ export const restoreDocument = async (req, res, next) => {
       userAgent: req.get('user-agent')
     });
 
-    // Sanitize response
     const responseData = sanitizeObjectXSS(document.toObject());
 
     res.status(200).json({
@@ -708,23 +717,13 @@ export const restoreDocument = async (req, res, next) => {
 
 /**
  * Search documents
- * Route: GET /api/documents/search
- * Access: Private
- * Query:
- *   - q: string (required, max 100 chars)
- *   - departmentId: ObjectId (optional)
- *   - limit: number (optional, default 20, max 100)
- * Response: { success: true, count, data: [documents] }
  */
 export const searchDocuments = async (req, res, next) => {
   try {
-    // Validate request
     const parsed = searchDocumentsSchema.safeParse({ query: req.query });
     validateRequest(parsed);
 
     const { q, departmentId, limit } = parsed.data.query;
-    
-    // Sanitize search query
     const sanitizedQuery = sanitizeInputWithXSS(q);
 
     let departmentName = null;
@@ -742,7 +741,6 @@ export const searchDocuments = async (req, res, next) => {
       { limit: limit || 20 }
     ).populate('createdBy', 'name email');
 
-    // Sanitize response
     const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc.toObject()));
 
     res.status(200).json({
@@ -756,16 +754,10 @@ export const searchDocuments = async (req, res, next) => {
 };
 
 /**
- * Generate download URL for document
- * Route: GET /api/documents/:id/download
- * Access: Private
- * Params:
- *   - id: ObjectId (required)
- * Response: { success: true, data: { url, expiresIn, filename } }
+ * Generate download URL
  */
 export const generateDownloadUrl = async (req, res, next) => {
   try {
-    // Validate request
     const parsed = getDocumentByIdSchema.safeParse({ params: req.params });
     validateRequest(parsed);
 
@@ -781,18 +773,14 @@ export const generateDownloadUrl = async (req, res, next) => {
 
     const bucketName = process.env.BUCKET_NAME || config?.aws?.bucketName;
     
-    // Generate presigned URL for download
     const command = new GetObjectCommand({
       Bucket: bucketName,
       Key: document.fileUrl,
       ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(document.displayName)}`
-
-
     });
 
     const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
 
-    // Log activity
     await ActivityLogModel.logActivity({
       action: 'DOCUMENT_DOWNLOADED',
       entityType: 'Document',
@@ -820,20 +808,15 @@ export const generateDownloadUrl = async (req, res, next) => {
 };
 
 /**
- * Create new version of document
+ * ✅ FIXED: Create new version (Re-upload)
  * Route: POST /api/documents/:id/versions
- * Access: Private
- * Params:
- *   - id: ObjectId (required)
- * Body:
- *   - fileUrl: string (required, S3 key)
- *   - size: number (required, max 5GB)
- *   - changeDescription: string (optional, max 500 chars)
- * Response: { success: true, message, data: newVersion }
+ * RULE 2: Re-Upload
+ * - Create new DocumentVersion with ALL new file metadata
+ * - Update Document with ALL new file metadata
+ * - Mark old version as isLatest=false
  */
 export const createVersion = async (req, res, next) => {
   try {
-    // ✅ Validate request using Zod
     const parsed = createVersionSchema.safeParse({
       params: req.params,
       body: req.body
@@ -841,120 +824,79 @@ export const createVersion = async (req, res, next) => {
     validateRequest(parsed);
 
     const { id } = parsed.data.params;
-    const {
-      fileUrl,
-      size,
-      mimeType,
-      extension,
-      name,
-      originalName,
-      changeDescription,
-      fileHash
-    } = parsed.data.body;
-
+    const data = parsed.data.body;
     const userId = req.user.id;
 
-    // ✅ Sanitize all inputs
-    const sanitizedId = sanitizeAndValidateId(id, "Document ID");
-    const sanitizedFileUrl = sanitizeInput(fileUrl);
-    const sanitizedMimeType = mimeType ? sanitizeInput(mimeType) : null;
-    const sanitizedExtension = extension ? sanitizeInput(extension) : null;
-    const sanitizedName = name ? sanitizeInputWithXSS(name) : null;
-    const sanitizedOriginalName = originalName ? sanitizeInputWithXSS(originalName) : null;
-    const sanitizedDescription = changeDescription
-      ? sanitizeInputWithXSS(changeDescription)
-      : "New version";
-    const sanitizedFileHash = fileHash ? sanitizeInput(fileHash) : null;
+    const document = await DocumentModel.findById(id);
+    if (!document) throw createHttpError(404, "Document not found");
 
-    // ✅ Check if document exists
-    const document = await DocumentModel.findById(sanitizedId);
-    if (!document) {
-      throw createHttpError(404, "Document not found");
-    }
-
-    // ✅ Create new version
-    const newVersion = await document.createNewVersion(
-      sanitizedFileUrl,
-      size,
-      sanitizedDescription,
-      userId,
-      {
-        mimeType: sanitizedMimeType,
-        extension: sanitizedExtension,
-        name: sanitizedName,
-        originalName: sanitizedOriginalName,
-        fileHash: sanitizedFileHash
-      }
+    // 🔥 VERY IMPORTANT: Detect file type (fix ZIP → image issue)
+    const detectedType = DocumentModel.getTypeFromMimeType(
+      sanitizeInput(data.mimeType),
+      sanitizeInput(data.extension)
     );
 
-    // ✅ Log activity
-    await ActivityLogModel.logActivity({
-      action: "VERSION_CREATED",
-      entityType: "DocumentVersion",
-      entityId: newVersion._id,
-      entityName: `${document.name} v${newVersion.versionNumber}`,
-      performedBy: userId,
-      performedByName: req.user.name,
-      performedByEmail: req.user.email,
-      description: `Created version ${newVersion.versionNumber} of document "${document.displayName}"`,
-      metadata: {
-        versionNumber: newVersion.versionNumber,
-        changeDescription: sanitizedDescription
-      },
-      ipAddress: req.ip,
-      userAgent: req.get("user-agent")
-    });
+    // 🔥 Build sanitized metadata for version
+    const fileMetadata = {
+      fileUrl: sanitizeInput(data.fileUrl),
+      size: data.size,
+      mimeType: sanitizeInput(data.mimeType),
+      extension: sanitizeInput(data.extension),
+      name: sanitizeInputWithXSS(data.name),
+      originalName: sanitizeInputWithXSS(data.originalName),
+      type: detectedType,     // <-- FIXED: ALWAYS detect type
+    };
 
-    // ✅ Sanitize and respond
-    const responseData = sanitizeObjectXSS(newVersion.toObject());
+    // Create new version
+    const newVersion = await document.reUpload(
+      fileMetadata,
+      data.changeDescription || "File re-uploaded",
+      userId
+    );
 
     res.status(201).json({
       success: true,
       message: "New version created successfully",
-      data: responseData
+      data: newVersion,
     });
   } catch (error) {
     next(error);
   }
 };
 
+
+
 /**
- * Get all versions of a document
- * Route: GET /api/documents/:id/versions
- * Access: Private
- * Params:
- *   - id: ObjectId (required)
- * Response: { success: true, count, data: [versions with formatted fields] }
+ * Get all versions
  */
 export const getAllVersions = async (req, res, next) => {
   try {
-    // Validate request
+
+    
     const parsed = getAllVersionsSchema.safeParse({ params: req.params });
     validateRequest(parsed);
 
     const { id } = parsed.data.params;
     const sanitizedId = sanitizeAndValidateId(id, 'Document ID');
 
-    // Check if document exists
     const documentExists = await DocumentModel.exists({ _id: sanitizedId });
     if (!documentExists) {
       throw createHttpError(404, 'Document not found');
     }
 
-    // Get versions
     const versions = await DocumentVersionModel.find({ documentId: sanitizedId })
-      .populate('documentId', 'name originalName _id')
-      .populate('createdBy', 'name email')
+      .populate('documentId', 'name originalName _id extension')
+      .populate('createdBy', 'username email')
       .sort({ versionNumber: -1 })
       .lean();
 
-    const formattedVersions = versions.map((v, index) => ({
-      ...sanitizeObjectXSS(v),
-      sizeFormatted: formatBytes(v.size),
-      isLatest: index === 0,
-      createdAgo: formatTimeAgo(v.createdAt),
-      id: v._id.toString()
-    }));
+    const formattedVersions = versions.map((v) => ({
+  ...sanitizeObjectXSS(v),
+  sizeFormatted: formatBytes(v.size),
+  createdAgo: formatTimeAgo(v.createdAt),
+  id: v._id.toString()
+}));
+
 
     res.status(200).json({
       success: true,
@@ -967,284 +909,30 @@ export const getAllVersions = async (req, res, next) => {
 };
 
 /**
- * Revert document to a specific version
- * Route: POST /api/documents/:id/revert
- * Access: Private
+ * ✅ FIXED: Revert to version
+ * Uses model's revertToVersion method
  */
 export const revertToVersion = async (req, res, next) => {
   try {
-    // Validate request
-    const parsed = revertToVersionSchema.safeParse({ 
-      params: req.params,
-      body: req.body 
-    });
+    const parsed = revertToVersionSchema.safeParse({ params: req.params, body: req.body });
     validateRequest(parsed);
 
     const { id } = parsed.data.params;
     const { versionNumber } = parsed.data.body;
     const userId = req.user.id;
-    
-    const sanitizedId = sanitizeAndValidateId(id, 'Document ID');
 
-    const document = await DocumentModel.findById(sanitizedId);
-    if (!document) {
-      throw createHttpError(404, 'Document not found');
-    }
+    const document = await DocumentModel.findById(id);
+    if (!document) throw createHttpError(404, "Document not found");
 
-    // Revert to version
-    const revertedVersion = await document.revertToVersion(versionNumber, userId);
-
-    // Populate references
-    await revertedVersion.populate([
-      { path: 'documentId', select: 'name originalName' },
-      { path: 'createdBy', select: 'name' }
-    ]);
-
-    await ActivityLogModel.logActivity({
-      action: 'VERSION_REVERTED',
-      entityType: 'Document',
-      entityId: document._id,
-      entityName: document.name,
-      performedBy: userId,
-      performedByName: req.user.name,
-      performedByEmail: req.user.email,
-      description: `Reverted "${document.displayName}" to version ${versionNumber}`,
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent')
-    });
-
-    // Sanitize response
-    const responseData = sanitizeObjectXSS(revertedVersion.toObject());
+    const reverted = await document.revertToVersion(versionNumber, userId);
 
     res.status(200).json({
       success: true,
-      message: 'Document reverted to selected version',
-      data: responseData
+      message: "Document reverted successfully",
+      data: reverted,
     });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * Add tags to a document
- * Route: POST /api/documents/:id/tags
- * Access: Private
- */
-export const addTags = async (req, res, next) => {
-  try {
-    // Validate request
-    const parsed = tagsOperationSchema.safeParse({ 
-      params: req.params,
-      body: req.body 
-    });
-    validateRequest(parsed);
-
-    const { id } = parsed.data.params;
-    const { tags } = parsed.data.body;
-    const userId = req.user.id;
-    
-    const sanitizedId = sanitizeAndValidateId(id, 'Document ID');
-    const sanitizedTags = tags.map(tag => sanitizeInputWithXSS(tag));
-
-    const document = await DocumentModel.findById(sanitizedId);
-    if (!document) {
-      throw createHttpError(404, 'Document not found');
-    }
-
-    // Add unique tags
-    document.tags = Array.from(new Set([...document.tags, ...sanitizedTags]));
-    document.updatedBy = userId;
-    await document.save();
-
-    await ActivityLogModel.logActivity({
-      action: 'TAGS_ADDED',
-      entityType: 'Document',
-      entityId: document._id,
-      entityName: document.name,
-      performedBy: userId,
-      performedByName: req.user.name,
-      performedByEmail: req.user.email,
-      description: `Added tags [${sanitizedTags.join(', ')}] to "${document.displayName}"`,
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent')
-    });
-
-    // Sanitize response
-    const responseData = sanitizeObjectXSS(document.toObject());
-
-    res.status(200).json({
-      success: true,
-      message: 'Tags added successfully',
-      data: responseData
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Remove tags from a document
- * Route: DELETE /api/documents/:id/tags
- * Access: Private
- */
-export const removeTags = async (req, res, next) => {
-  try {
-    // Validate request
-    const parsed = tagsOperationSchema.safeParse({ 
-      params: req.params,
-      body: req.body 
-    });
-    validateRequest(parsed);
-
-    const { id } = parsed.data.params;
-    const { tags } = parsed.data.body;
-    const userId = req.user.id;
-    
-    const sanitizedId = sanitizeAndValidateId(id, 'Document ID');
-    const sanitizedTags = tags.map(tag => sanitizeInputWithXSS(tag));
-
-    const document = await DocumentModel.findById(sanitizedId);
-    if (!document) {
-      throw createHttpError(404, 'Document not found');
-    }
-
-    const before = [...document.tags];
-    document.tags = document.tags.filter(tag => !sanitizedTags.includes(tag));
-    document.updatedBy = userId;
-    await document.save();
-
-    await ActivityLogModel.logActivity({
-      action: 'TAGS_REMOVED',
-      entityType: 'Document',
-      entityId: document._id,
-      entityName: document.name,
-      performedBy: userId,
-      performedByName: req.user.name,
-      performedByEmail: req.user.email,
-      description: `Removed tags [${sanitizedTags.join(', ')}] from "${document.displayName}"`,
-      changes: { tags: { before, after: document.tags } },
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent')
-    });
-
-    // Sanitize response
-    const responseData = sanitizeObjectXSS(document.toObject());
-
-    res.status(200).json({
-      success: true,
-      message: 'Tags removed successfully',
-      data: responseData
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Find documents by tags
- * Route: GET /api/documents/tags
- * Access: Private
- */
-export const findByTags = async (req, res, next) => {
-  try {
-    // Validate request
-    const parsed = findByTagsSchema.safeParse({ query: req.query });
-    validateRequest(parsed);
-
-    const tagArray = parsed.data.query.tags;
-    const sanitizedTags = tagArray.map(tag => sanitizeInputWithXSS(tag));
-
-    const documents = await DocumentModel.find({ 
-      tags: { $in: sanitizedTags }, 
-      isDeleted: false 
-    })
-      .populate('createdBy', 'name email')
-      .populate('updatedBy', 'name email');
-
-    // Sanitize response
-    const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc.toObject()));
-
-    res.status(200).json({
-      success: true,
-      count: sanitizedDocuments.length,
-      data: sanitizedDocuments
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Find documents by file extension
- * Route: GET /api/documents/extension/:ext
- * Access: Private
- */
-export const findByExtension = async (req, res, next) => {
-  try {
-    // Validate request
-    const parsed = findByExtensionSchema.safeParse({ params: req.params });
-    validateRequest(parsed);
-
-    const { ext } = parsed.data.params;
-    const sanitizedExt = sanitizeInput(ext);
-
-    const documents = await DocumentModel.find({ 
-      extension: sanitizedExt, 
-      isDeleted: false 
-    }).populate('createdBy', 'name email');
-
-    // Sanitize response
-    const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc.toObject()));
-
-    res.status(200).json({
-      success: true,
-      count: sanitizedDocuments.length,
-      data: sanitizedDocuments
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Get department-wise document statistics
- * Route: GET /api/departments/:departmentId/stats
- * Access: Private
- */
-export const getDepartmentStats = async (req, res, next) => {
-  try {
-    // Validate request
-    const parsed = getDepartmentStatsSchema.safeParse({ params: req.params });
-    validateRequest(parsed);
-
-    const { departmentId } = parsed.data.params;
-    const sanitizedDeptId = sanitizeAndValidateId(departmentId, 'Department ID');
-
-    const department = await DepartmentModel.findById(sanitizedDeptId);
-    if (!department) {
-      throw createHttpError(404, 'Department not found');
-    }
-
-    const stats = await DocumentModel.aggregate([
-      { $match: { path: { $regex: department.name }, isDeleted: false } },
-      {
-        $group: {
-          _id: '$extension',
-          totalSize: { $sum: '$size' },
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-
-    // Sanitize response
-    const sanitizedStats = sanitizeObjectXSS(stats);
-
-    res.status(200).json({
-      success: true,
-      data: sanitizedStats
-    });
-  } catch (error) {
-    next(error);
-  }
-};

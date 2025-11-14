@@ -101,7 +101,7 @@ export const search = async (req, res) => {
           .sort(sort)
           .skip(skip)
           .limit(parseInt(limit))
-          .populate('createdBy', 'name email')
+          .populate('createdBy', 'username email')
           .lean(),
         DocumentModel.countDocuments(documentQuery)
       ]);
@@ -113,7 +113,7 @@ export const search = async (req, res) => {
           .sort(sort)
           .skip(skip)
           .limit(parseInt(limit))
-          .populate('createdBy', 'name email')
+          .populate('createdBy', 'username email')
           .lean(),
         FolderModel.countDocuments(folderQuery)
       ]);

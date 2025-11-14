@@ -14,7 +14,12 @@ const documentVersionSchema = new mongoose.Schema(
       required: [true, "Version number is required"],
       min: [1, "Version number must be at least 1"]
     },
-
+type: {
+  type: String,
+  required: true,
+  index: true
+}
+,
     name: {
       type: String,
       required: [true, "Document name is required"],
@@ -53,7 +58,7 @@ const documentVersionSchema = new mongoose.Schema(
     isLatest: {
       type: Boolean,
       default: false,
-      index: true // ✅ keep only this one basic index
+      index: true
     },
 
     changeDescription: {
@@ -80,7 +85,7 @@ const documentVersionSchema = new mongoose.Schema(
   {
     timestamps: {
       createdAt: true,
-      updatedAt: false
+      updatedAt: false // ✅ Versions are immutable
     },
     toJSON: { virtuals: true },
     toObject: { virtuals: true }
@@ -88,13 +93,12 @@ const documentVersionSchema = new mongoose.Schema(
 );
 
 //
-// ✅ Index cleanup (no duplicates)
+// ✅ Indexes
 //
 documentVersionSchema.index({ documentId: 1, versionNumber: -1 });
 documentVersionSchema.index({ documentId: 1, createdAt: -1 });
 
-// ✅ Removed plain index({ documentId: 1, isLatest: 1 }) to avoid duplication
-// ✅ Keep only the partial unique index below
+// ✅ Partial unique index for isLatest
 documentVersionSchema.index(
   { documentId: 1, isLatest: 1 },
   { unique: true, partialFilterExpression: { isLatest: true } }
@@ -105,9 +109,8 @@ documentVersionSchema.index(
   { unique: true }
 );
 
-
 //
-// === Virtuals (unchanged) ===
+// === Virtuals ===
 //
 documentVersionSchema.virtual("sizeFormatted").get(function () {
   const bytes = this.size;
@@ -160,7 +163,7 @@ documentVersionSchema.virtual("fileCategory").get(function () {
 });
 
 //
-// === Instance and static methods (unchanged) ===
+// === Instance methods ===
 //
 documentVersionSchema.methods.getPreviousVersion = async function () {
   if (this.versionNumber === 1) return null;
@@ -215,7 +218,79 @@ documentVersionSchema.methods.markAsLatest = async function (session = null) {
   return this;
 };
 
-// (Keep all other statics + pre-save logic the same)
+documentVersionSchema.statics.createNewVersion = async function (
+  documentId,
+  fileData,
+  changeDescription,
+  userId
+) {
+  // Make previous latest false
+  await this.updateMany(
+    { documentId },
+    { $set: { isLatest: false } }
+  );
+
+  console.log("🔥 createNewVersion received fileData:", fileData);
+
+  // NEW VERSION NUMBER
+  const lastVersion = await this.findOne({ documentId }).sort({ versionNumber: -1 });
+  const nextVersionNumber = lastVersion ? lastVersion.versionNumber + 1 : 1;
+
+  // Create the new version
+  const newVersion = await this.create({
+    documentId,
+    versionNumber: nextVersionNumber,
+    name: fileData.name,
+    originalName: fileData.originalName,
+    mimeType: fileData.mimeType,
+    extension: fileData.extension,
+    size: fileData.size,
+    fileUrl: fileData.fileUrl,
+    type: fileData.type,    // 🔥🔥 FIX: THIS MUST BE HERE
+    isLatest: true,
+    createdBy: userId,
+    changeDescription
+  });
+
+  return newVersion;
+};
+
+// ✅ FIXED: Only update LATEST version name (for rename operation)
+documentVersionSchema.statics.updateLatestVersionName = async function (
+  documentId,
+  newName,
+  session = null
+) {
+  const DocumentVersion = this;
+  
+  // Find the latest version
+  const latestVersion = await DocumentVersion.findOne({ 
+    documentId, 
+    isLatest: true 
+  }).session(session);
+  
+  if (!latestVersion) {
+    throw new Error('No latest version found');
+  }
+  
+  // Update only the latest version's name
+  const ext = latestVersion.extension || 'bin';
+  const newOriginalName = `${newName}.${ext}`;
+  
+  latestVersion.name = newName;
+  latestVersion.originalName = newOriginalName;
+  
+  // Update pathAtCreation to reflect new name
+  if (latestVersion.pathAtCreation) {
+    const pathParts = latestVersion.pathAtCreation.split('/');
+    pathParts[pathParts.length - 1] = newOriginalName;
+    latestVersion.pathAtCreation = pathParts.join('/');
+  }
+  
+  await latestVersion.save({ session });
+  
+  return latestVersion;
+};
 
 const DocumentVersionModel =
   mongoose.models.DocumentVersion ||

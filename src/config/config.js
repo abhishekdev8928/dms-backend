@@ -6,6 +6,8 @@ conf({
       : "./.env.development",
 });
 
+console.log(process.env.MONGO_DB_URL)
+
 const _config = {
   port: process.env.PORT || 3200,
   env: process.env.NODE_ENV,

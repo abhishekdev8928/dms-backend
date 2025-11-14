@@ -21,6 +21,7 @@ import {
   getFolderByPathSchema
 } from '../validation/folderValidation.js';
 import { ALLOWED_EXTENSIONS } from '../validation/documentValidation.js';
+import DocumentModel from '../models/documentModel.js';
 
 /**
  * Create a new folder
@@ -251,33 +252,28 @@ export const getChildFolders = async (req, res, next) => {
 
     // Validate query
     const queryData = getChildFoldersQuerySchema.safeParse(req.query);
-    console.log("🔍 Query validation result:", queryData);
     validateRequest(queryData);
 
     const { id } = paramsData.data;
-    const { includeDeleted, type, extension, userEmail, search } = queryData.data;
+    const { includeDeleted, type, userEmail } = queryData.data;
     
-    console.log("🔍 Extracted values:", { includeDeleted, type, extension, userEmail, search });
+    console.log("🔍 Extracted values:", { includeDeleted, type, userEmail });
 
     const sanitizedId = sanitizeAndValidateId(id, "Parent ID");
 
-    // 🔥 Check if parent is a Folder OR Department
+    // Check if parent is a Folder OR Department
     let parent;
     let parentType;
     
-    // Try to find as Folder first
     parent = await FolderModel.findById(sanitizedId);
     
     if (parent) {
       parentType = "folder";
-      console.log(`✅ Parent found: Folder "${parent.name}"`);
     } else {
-      // If not found as folder, try Department
       parent = await DepartmentModel.findById(sanitizedId);
       
       if (parent) {
         parentType = "department";
-        console.log(`✅ Parent found: Department "${parent.name}"`);
       } else {
         throw createHttpError(404, "Parent folder or department not found");
       }
@@ -286,13 +282,14 @@ export const getChildFolders = async (req, res, next) => {
     let children;
     let mode = "direct";
 
-    // If ANY filter is provided, get ALL nested children (Google Drive behavior)
-    const hasFilters = type || extension || userEmail || search;
+    // If ANY filter is provided, get ALL nested children
+    const hasFilters = type || userEmail;
 
     if (hasFilters) {
       console.log(`🔍 Starting NESTED search from ${parentType}: ${parent.name} (ID: ${sanitizedId})`);
-      console.log(`📋 Filters requested: type=${type}, extension=${extension}, userEmail=${userEmail}, search=${search}`);
+      console.log(`📋 Filters requested: type=${type}, userEmail=${userEmail}`);
       
+      // Get ALL nested children WITHOUT filtering during traversal
       children = await getAllNestedChildren(
         sanitizedId,
         includeDeleted === "true"
@@ -302,19 +299,24 @@ export const getChildFolders = async (req, res, next) => {
       mode = "nested";
     } else {
       // No filters: just get direct children
-      // 🔥 FIX: Handle both Folder and Department differently
       if (parentType === "folder") {
         children = await parent.getChildren(includeDeleted === "true");
       } else {
-        // For departments, manually query folders with parent_id
         const query = { 
           parent_id: sanitizedId,
           ...(includeDeleted === "true" ? {} : { isDeleted: false })
         };
-        children = await FolderModel.find(query).sort({ createdAt: -1 });
+
+        // Get subfolders
+        const folders = await FolderModel.find(query).sort({ createdAt: -1 });
+
+        // Get documents/files
+        const documents = await DocumentModel.find(query).sort({ createdAt: -1 });
+
+        // Combine them
+        children = [...folders, ...documents];
       }
       
-      // Populate createdBy and updatedBy for direct children
       await FolderModel.populate(children, [
         { path: 'createdBy', select: 'email username' },
         { path: 'updatedBy', select: 'email username' }
@@ -323,39 +325,24 @@ export const getChildFolders = async (req, res, next) => {
       console.log(`📦 Direct children only: ${children.length} items`);
     }
 
-    // Apply filters in smart order
+    // Apply filters AFTER getting all children
     let filteredChildren = children;
 
-    // STEP 1: Filter by extension FIRST (most specific)
-    if (extension) {
-      const ext = extension.toLowerCase();
-      
-      if (!ALLOWED_EXTENSIONS.includes(ext)) {
-        throw createHttpError(400, `Invalid extension. Allowed: ${ALLOWED_EXTENSIONS.join(", ")}`);
-      }
+    // STEP 1: Filter by type
+  // STEP 1: Filter by type
+if (type) {
+  const typeFilter = type.toLowerCase();
+  
+  // Simply filter by matching the type field in documents
+  // No predefined list needed - match whatever type exists in the data
+  filteredChildren = filteredChildren.filter(
+    (child) => child.type && child.type.toLowerCase() === typeFilter
+  );
+  
+  console.log(`🔧 After type filter (${typeFilter}): ${filteredChildren.length} items`);
+}
 
-      filteredChildren = filteredChildren.filter((child) => {
-        if (child.type === "folder") return false;
-        const fileExt = child.extension?.toLowerCase() || child.name?.split(".").pop()?.toLowerCase();
-        return fileExt === ext;
-      });
-      console.log(`🔧 After extension filter (${ext}): ${filteredChildren.length} items`);
-    }
-    // STEP 2: If no extension, apply type filter
-    else if (type) {
-      const typeFilter = type.toLowerCase();
-      
-      if (typeFilter !== "folder" && typeFilter !== "documents") {
-        throw createHttpError(400, 'Invalid type. Allowed: "folder" or "documents"');
-      }
-      
-      filteredChildren = filteredChildren.filter(
-        (child) => child.type === typeFilter
-      );
-      console.log(`🔧 After type filter (${typeFilter}): ${filteredChildren.length} items`);
-    }
-
-    // STEP 3: Filter by user email
+    // STEP 2: Filter by user email
     if (userEmail) {
       const emailLower = userEmail.trim().toLowerCase();
       
@@ -375,32 +362,7 @@ export const getChildFolders = async (req, res, next) => {
       console.log(`🔧 After userEmail filter (${emailLower}): ${filteredChildren.length} items`);
     }
 
-    // STEP 4: Filter by search query
-    if (search && search.trim().length > 0) {
-      const searchLower = search.trim().toLowerCase();
-      
-      filteredChildren = filteredChildren.filter((child) =>
-        child.name.toLowerCase().includes(searchLower) ||
-        (child.path && child.path.toLowerCase().includes(searchLower))
-      );
-      console.log(`🔧 After search filter ("${searchLower}"): ${filteredChildren.length} items`);
-    }
-
     console.log(`✅ Final results: ${filteredChildren.length} items returned`);
-
-    console.log({
-      success: true,
-      count: filteredChildren.length,
-      mode: mode,
-      parentType: parentType,
-      filters: {
-        type: type || null,
-        extension: extension || null,
-        userEmail: userEmail || null,
-        search: search || null,
-      },
-      data: filteredChildren,
-    })
 
     res.status(200).json({
       success: true,
@@ -409,11 +371,9 @@ export const getChildFolders = async (req, res, next) => {
       parentType: parentType,
       filters: {
         type: type || null,
-        extension: extension || null,
         userEmail: userEmail || null,
-        search: search || null,
       },
-       children: filteredChildren,
+      children: filteredChildren,
     });
   } catch (error) {
     next(error);
@@ -422,6 +382,7 @@ export const getChildFolders = async (req, res, next) => {
 
 /**
  * Recursively get all nested children from a folder
+ * NO FILTERING - just collect everything
  */
 async function getAllNestedChildren(folderId, includeDeleted = false) {
   const allChildren = [];
@@ -434,14 +395,13 @@ async function getAllNestedChildren(folderId, includeDeleted = false) {
     const { id, path, depth } = queue.shift();
 
     if (visited.has(id)) {
-      console.log(`⚠️ Skipping already visited folder: ${id}`);
       continue;
     }
     visited.add(id);
 
     console.log(`📂 Processing folder at depth ${depth}: ${id}, path: "${path}"`);
 
-    // 🔥 Try to find as Folder first, then Department
+    // Try to find as Folder first, then Department
     let parent = await FolderModel.findById(id);
     let children;
     
@@ -452,16 +412,18 @@ async function getAllNestedChildren(folderId, includeDeleted = false) {
       // Try as Department
       parent = await DepartmentModel.findById(id);
       if (!parent) {
-        console.log(`❌ Parent not found: ${id}`);
         continue;
       }
       
-      // For departments, manually query folders
+      // For departments, manually query folders AND documents
       const query = { 
         parent_id: id,
         ...(includeDeleted ? {} : { isDeleted: false })
       };
-      children = await FolderModel.find(query).sort({ createdAt: -1 });
+      
+      const folders = await FolderModel.find(query).sort({ createdAt: -1 });
+      const documents = await DocumentModel.find(query).sort({ createdAt: -1 });
+      children = [...folders, ...documents];
     }
     
     // Populate createdBy and updatedBy
@@ -487,6 +449,7 @@ async function getAllNestedChildren(folderId, includeDeleted = false) {
       allChildren.push(childData);
       console.log(`   ✅ Added: [${child.type}] ${child.name} at depth ${childDepth}`);
 
+      // ALWAYS traverse into folders regardless of type filter
       if (child.type === "folder" && child._id) {
         queue.push({ 
           id: child._id, 
@@ -501,7 +464,7 @@ async function getAllNestedChildren(folderId, includeDeleted = false) {
   console.log(`✨ getAllNestedChildren completed. Total items collected: ${allChildren.length}`);
   
   const folderCount = allChildren.filter(c => c.type === "folder").length;
-  const docCount = allChildren.filter(c => c.type === "documents").length;
+  const docCount = allChildren.filter(c => c.type !== "folder").length;
   console.log(`   📊 Summary: ${folderCount} folders, ${docCount} documents`);
 
   return allChildren;

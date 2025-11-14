@@ -51,16 +51,13 @@ export const getRootFoldersQuerySchema = z.object({
 export const getFolderByIdSchema = z.object({
   id: objectIdSchema
 });
-
 /**
  * Get Child Folders Query
  */
 export const getChildFoldersQuerySchema = z.object({
   includeDeleted: z.string().optional(),
-  type: z.enum(['folder', 'documents']).optional(), // Changed 'file' to 'documents' to match your data
-  extension: z.string().optional(), // ✅ ADDED
-  userEmail: z.string().email().optional(), // ✅ ADDED with email validation
-  search: z.string().optional(), // ✅ ADDED
+  type: z.string().optional(), // ✅ Changed to string - accepts any type value
+  userEmail: z.string().optional(),
 });
 
 /**

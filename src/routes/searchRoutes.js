@@ -51,10 +51,10 @@ router.get('/quick', quickSearch);
  * @example GET /api/search/filter-types
  * @example GET /api/search/filter-types?query=report
  */
-router.get('/filter-types', getFilterTypes);
+router.get('/filter-types', authenticateUser, getFilterTypes);
 
 
 
-router.get("/users",getAllUsers)
+router.get("/users",authenticateUser,getAllUsers)
 
 export default router;

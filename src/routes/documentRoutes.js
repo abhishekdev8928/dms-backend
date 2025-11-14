@@ -164,7 +164,7 @@ router.get('/:id/versions', authenticateUser, getAllVersions);
  * @access  Private
  * @body    { versionNumber: number }
  */
-router.post('/:id/revert', authenticateUser, revertToVersion);
+router.post('/:id/versions/revert', authenticateUser, revertToVersion);
 
 
 export default router;

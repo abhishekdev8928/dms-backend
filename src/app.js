@@ -16,7 +16,7 @@ import documentRoutes from "./routes/documentRoutes.js"
 import globalErrorHandler from "./middleware/globalErrorHandler.js";
 import searchRoutes from "./routes/searchRoutes.js";
 import restoreRoutes from "./routes/restoreRoutes.js"
-
+console.log("from here" ,process.env.MONGO_DB_URL)
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {

@@ -16,4 +16,6 @@ export const connectDb = async () => {
 
 
   await mongoose.connect(config?.databaseUrl)
+
+  console.log(config?.databaseUrl)
 };

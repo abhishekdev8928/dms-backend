@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import DocumentModel from "./documentModel.js";
 
 const folderSchema = new mongoose.Schema({
   name: {
@@ -277,6 +278,22 @@ folderSchema.post('save', async function(doc) {
     }
   }
 });
+
+// In FolderModel schema methods:
+folderSchema.methods.getChildren = async function (includeDeleted = false) {
+  const query= {
+    parent_id: this._id,
+    ...(includeDeleted ? {} : { isDeleted: false })
+  };
+
+  const [folders, documents] = await Promise.all([
+    FolderModel.find(query),
+    DocumentModel.find(query)
+  ]);
+
+  return [...folders, ...documents].sort((a, b) => b.createdAt - a.createdAt);
+};
+
 
 const FolderModel = mongoose.models.Folder || mongoose.model('Folder', folderSchema);
 

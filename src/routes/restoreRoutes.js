@@ -1,62 +1,33 @@
-import { Router } from 'express';
+// routes/trashRoutes.js
+
+import express from 'express';
 import {
   getTrashItems,
-  restoreFolder,
-  restoreDocument,
-  permanentlyDeleteFolder,
-  permanentlyDeleteDocument,
-  getTrashStats,
+  restoreItem,
+  permanentlyDeleteItem,
+  bulkRestoreItems,
+  bulkPermanentlyDeleteItems,
 } from '../controller/restoreController.js';
-import { authenticateUser } from '../middleware/authMiddleware.js'; // Your auth middleware
+import { authenticateUser } from '../middleware/authMiddleware.js';
 
-const router = Router();
+const router = express.Router();
 
-// Apply authentication to all routes
+// All routes require authentication
 router.use(authenticateUser);
 
-/**
- * GET /api/trash
- * Get all deleted items (folders and documents)
- * Query params: 
- *   - page: number (default: 1)
- *   - limit: number (default: 20)
- *   - search: string (search by name)
- *   - sortBy: string (default: 'deletedAt')
- *   - order: 'asc' | 'desc' (default: 'desc')
- *   - type: 'all' | 'folder' | 'document' (default: 'all')
- *   - deletedBy: 'anyone' | 'me' (default: 'anyone')
- *   - dateDeleted: 'all' | 'last7days' | 'last30days' | 'older' (default: 'all')
- */
+// Get trash items with pagination
 router.get('/', getTrashItems);
 
-/**
- * GET /api/trash/stats
- * Get trash statistics (total folders, documents, size)
- */
-router.get('/stats', getTrashStats);
+// Restore single item
+router.post('/restore/:id', restoreItem);
 
-/**
- * POST /api/trash/folders/:id/restore
- * Restore a deleted folder and all its descendants
- */
-router.post('/folders/:id/restore', restoreFolder);
+// Permanently delete single item
+router.delete('/:id', permanentlyDeleteItem);
 
-/**
- * POST /api/trash/documents/:id/restore
- * Restore a deleted document
- */
-router.post('/documents/:id/restore', restoreDocument);
+// Bulk restore
+router.post('/restore/bulk', bulkRestoreItems);
 
-/**
- * DELETE /api/trash/folders/:id/permanent
- * Permanently delete a folder and all its contents
- */
-router.delete('/folders/:id/permanent', permanentlyDeleteFolder);
-
-/**
- * DELETE /api/trash/documents/:id/permanent
- * Permanently delete a document
- */
-router.delete('/documents/:id/permanent', permanentlyDeleteDocument);
+// Bulk permanently delete
+router.post('/delete/bulk', bulkPermanentlyDeleteItems);
 
 export default router;
