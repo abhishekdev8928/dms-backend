@@ -869,10 +869,48 @@ export const createVersion = async (req, res, next) => {
 /**
  * Get all versions
  */
-export const getAllVersions = async (req, res, next) => {
-  try {
+// export const getAllVersions = async (req, res, next) => {
+//   try {
 
     
+//     const parsed = getAllVersionsSchema.safeParse({ params: req.params });
+//     validateRequest(parsed);
+
+//     const { id } = parsed.data.params;
+//     const sanitizedId = sanitizeAndValidateId(id, 'Document ID');
+
+//     const documentExists = await DocumentModel.exists({ _id: sanitizedId });
+//     if (!documentExists) {
+//       throw createHttpError(404, 'Document not found');
+//     }
+
+//     const versions = await DocumentVersionModel.find({ documentId: sanitizedId })
+//       .populate('documentId', 'name originalName _id extension')
+//       .populate('createdBy', 'username email')
+//       .sort({ versionNumber: -1 })
+//       .lean();
+
+//     const formattedVersions = versions.map((v) => ({
+//   ...sanitizeObjectXSS(v),
+//   sizeFormatted: formatBytes(v.size),
+//   createdAgo: formatTimeAgo(v.createdAt),
+//   id: v._id.toString()
+// }));
+
+
+//     res.status(200).json({
+//       success: true,
+//       count: formattedVersions.length,
+//       data: formattedVersions
+//     });
+//   } catch (error) {
+//     next(error);
+//   }
+// };
+
+
+export const getAllVersions = async (req, res, next) => {
+  try {
     const parsed = getAllVersionsSchema.safeParse({ params: req.params });
     validateRequest(parsed);
 
@@ -884,19 +922,25 @@ export const getAllVersions = async (req, res, next) => {
       throw createHttpError(404, 'Document not found');
     }
 
+    // Fetch versions
     const versions = await DocumentVersionModel.find({ documentId: sanitizedId })
-      .populate('documentId', 'name originalName _id extension')
+      .populate('documentId', 'name originalName _id extension type')
       .populate('createdBy', 'username email')
-      .sort({ versionNumber: -1 })
       .lean();
 
-    const formattedVersions = versions.map((v) => ({
-  ...sanitizeObjectXSS(v),
-  sizeFormatted: formatBytes(v.size),
-  createdAgo: formatTimeAgo(v.createdAt),
-  id: v._id.toString()
-}));
+    // Sort: isLatest first, then by versionNumber descending
+    const sortedVersions = versions.sort((a, b) => {
+      if (a.isLatest && !b.isLatest) return -1;  // a first
+      if (!a.isLatest && b.isLatest) return 1;   // b first
+      return b.versionNumber - a.versionNumber;  // else by versionNumber
+    });
 
+    const formattedVersions = sortedVersions.map((v) => ({
+      ...sanitizeObjectXSS(v),
+      sizeFormatted: formatBytes(v.size),
+      createdAgo: formatTimeAgo(v.createdAt),
+      id: v._id.toString()
+    }));
 
     res.status(200).json({
       success: true,
@@ -912,6 +956,31 @@ export const getAllVersions = async (req, res, next) => {
  * ✅ FIXED: Revert to version
  * Uses model's revertToVersion method
  */
+// export const revertToVersion = async (req, res, next) => {
+//   try {
+//     const parsed = revertToVersionSchema.safeParse({ params: req.params, body: req.body });
+//     validateRequest(parsed);
+
+//     const { id } = parsed.data.params;
+//     const { versionNumber } = parsed.data.body;
+//     const userId = req.user.id;
+
+//     const document = await DocumentModel.findById(id);
+//     if (!document) throw createHttpError(404, "Document not found");
+
+//     const reverted = await document.revertToVersion(versionNumber, userId);
+
+//     res.status(200).json({
+//       success: true,
+//       message: "Document reverted successfully",
+//       data: reverted,
+//     });
+//   } catch (error) {
+//     next(error);
+//   }
+// };
+
+
 export const revertToVersion = async (req, res, next) => {
   try {
     const parsed = revertToVersionSchema.safeParse({ params: req.params, body: req.body });
@@ -924,12 +993,12 @@ export const revertToVersion = async (req, res, next) => {
     const document = await DocumentModel.findById(id);
     if (!document) throw createHttpError(404, "Document not found");
 
-    const reverted = await document.revertToVersion(versionNumber, userId);
+    const result = await document.revertToVersion(versionNumber, userId);
 
     res.status(200).json({
       success: true,
-      message: "Document reverted successfully",
-      data: reverted,
+      message: `Reverted to version ${versionNumber}`,
+      data: result,
     });
   } catch (error) {
     next(error);

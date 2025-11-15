@@ -345,35 +345,85 @@ documentSchema.methods.getVersion = async function(versionNumber) {
 };
 
 // ✅ FIXED: Revert creates new version with old version's metadata
+// documentSchema.methods.revertToVersion = async function(versionNumber, userId, session = null) {
+//   const DocumentVersionModel = mongoose.model('DocumentVersion');
+  
+//   const targetVersion = await DocumentVersionModel.findOne({
+//     documentId: this._id,
+//     versionNumber: versionNumber
+//   }).session(session);
+  
+//   if (!targetVersion) {
+//     throw new Error(`Version ${versionNumber} not found`);
+//   }
+  
+//   // Create new version based on old version's file
+//   const revertedFileData = {
+//     fileUrl: targetVersion.fileUrl,
+//     size: targetVersion.size,
+//     mimeType: targetVersion.mimeType,
+//     extension: targetVersion.extension,
+//     name: targetVersion.name,
+//     originalName: targetVersion.originalName
+//   };
+  
+//   return this.reUpload(
+//     revertedFileData,
+//     `Reverted to version ${versionNumber}`,
+//     userId,
+//     session
+//   );
+// };
+
 documentSchema.methods.revertToVersion = async function(versionNumber, userId, session = null) {
-  const DocumentVersionModel = mongoose.model('DocumentVersion');
-  
-  const targetVersion = await DocumentVersionModel.findOne({
+  const DocumentVersion = mongoose.model("DocumentVersion");
+
+  // Find target version
+  const target = await DocumentVersion.findOne({
     documentId: this._id,
-    versionNumber: versionNumber
+    versionNumber
   }).session(session);
-  
-  if (!targetVersion) {
+
+  if (!target) {
     throw new Error(`Version ${versionNumber} not found`);
   }
-  
-  // Create new version based on old version's file
-  const revertedFileData = {
-    fileUrl: targetVersion.fileUrl,
-    size: targetVersion.size,
-    mimeType: targetVersion.mimeType,
-    extension: targetVersion.extension,
-    name: targetVersion.name,
-    originalName: targetVersion.originalName
+
+  // 1️⃣ Set all versions to not latest
+  await DocumentVersion.updateMany(
+    { documentId: this._id },
+    { $set: { isLatest: false } }
+  ).session(session);
+
+  // 2️⃣ Mark selected version as latest
+  target.isLatest = true;
+  await target.save({ session });
+
+  // 3️⃣ Update main Document fields (file info + type)
+  this.fileUrl = target.fileUrl;
+  this.size = target.size;
+  this.mimeType = target.mimeType;
+  this.extension = target.extension;
+  this.name = target.name;
+  this.originalName = target.originalName;
+
+  // ✅ Update type (if your Document has a type field)
+  if (target.type) {
+    this.type = target.type;
+  }
+
+  // Optional: update modifiedBy
+  this.modifiedBy = userId;
+
+  await this.save({ session });
+
+  return {
+    revertedTo: versionNumber,
+    document: this,
+    version: target
   };
-  
-  return this.reUpload(
-    revertedFileData,
-    `Reverted to version ${versionNumber}`,
-    userId,
-    session
-  );
 };
+
+
 
 documentSchema.methods.moveTo = async function(newParentId, session = null) {
   const FolderModel = mongoose.model('Folder');
