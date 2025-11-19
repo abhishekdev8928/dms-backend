@@ -3,7 +3,6 @@
 import createHttpError from 'http-errors';
 import FolderModel from '../models/folderModel.js';
 import DocumentModel from '../models/documentModel.js';
-import ActivityLogModel from '../models/activityModel.js';
 import mongoose from 'mongoose';
 import { 
   sanitizeInputWithXSS, 
@@ -32,19 +31,17 @@ export const getTrashItems = async (req, res, next) => {
       deletedAt: { $gte: thirtyDaysAgo, $ne: null }
     };
 
-    // ✅ FIXED: Folders don't have deletedBy field - populate createdBy instead
     const [folders, totalFolders] = await Promise.all([
       FolderModel.find(baseQuery)
-        .populate("createdBy", "name username email profilePic")
+        .populate("deletedBy", "name email profilePic") // <- populate name, not username
         .sort({ deletedAt: -1 })
         .lean(),
       FolderModel.countDocuments(baseQuery)
     ]);
 
-    // ✅ Documents have deletedBy field - populate it
     const [documents, totalDocuments] = await Promise.all([
       DocumentModel.find(baseQuery)
-        .populate("deletedBy", "name username email profilePic")
+        .populate("deletedBy", "username email profilePic") // <- populate name, not username
         .sort({ deletedAt: -1 })
         .lean(),
       DocumentModel.countDocuments(baseQuery)
@@ -68,10 +65,6 @@ export const getTrashItems = async (req, res, next) => {
         (autoDeleteDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
       );
 
-      // For folders: use createdBy as the deletedBy info
-      // For documents: use actual deletedBy field
-      const deletedByUser = item.deletedBy || item.createdBy;
-
       return {
         id: item._id,
         name: item.name,
@@ -82,13 +75,12 @@ export const getTrashItems = async (req, res, next) => {
         autoDeleteDate,
         size: item.size || null,
         description: item.description || null,
-        deletedBy: deletedByUser
+        deletedBy: item.deletedBy
           ? {
-              id: deletedByUser._id,
-              name: deletedByUser.name,
-              username: deletedByUser.username,
-              email: deletedByUser.email,
-              profilePic: deletedByUser.profilePic || null
+              id: item.deletedBy._id,
+              username: item.deletedBy.username, // <- corrected
+              email: item.deletedBy.email,
+              profilePic: item.deletedBy.profilePic || null
             }
           : null
       };
@@ -119,7 +111,6 @@ export const getTrashItems = async (req, res, next) => {
 export const restoreItem = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const userId = req.user.id;
     const sanitizedId = sanitizeAndValidateId(id, 'Item ID');
 
     // Try to find as folder first
@@ -174,27 +165,6 @@ export const restoreItem = async (req, res, next) => {
         { isDeleted: false, deletedAt: null }
       );
     }
-
-    // Log restore activity
-    const targetType = itemType === 'folder' ? 'folder' : 'file';
-    const action = itemType === 'folder' ? 'FOLDER_RESTORED' : 'FILE_RESTORED';
-    
-    await ActivityLogModel.logActivity({
-      userId: userId,
-      action: action,
-      targetType: targetType,
-      targetId: item._id,
-      metadata: {
-        ...(itemType === 'folder' 
-          ? { folderName: item.name }
-          : { 
-              fileName: item.name,
-              fileExtension: ActivityLogModel.getFileExtension(item.name),
-              fileType: item.mimeType || item.type
-            }
-        )
-      }
-    });
 
     res.status(200).json({
       success: true,
@@ -276,10 +246,8 @@ export const permanentlyDeleteItem = async (req, res, next) => {
  */
 export const bulkRestoreItems = async (req, res, next) => {
   try {
-    console.log("Bulk restore requested...");
-    
-    const userId = req.user.id;
-    
+
+    console.log("requested received here .......")
     // Validate request
     const parsed = bulkRestoreSchema.safeParse(req);
     if (!parsed.success) {
@@ -293,9 +261,6 @@ export const bulkRestoreItems = async (req, res, next) => {
 
     const restored = [];
     const failed = [];
-
-    // Generate bulk group ID for activity logging
-    const bulkGroupId = `grp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
     for (const itemId of sanitizedIds) {
       try {
@@ -347,29 +312,6 @@ export const bulkRestoreItems = async (req, res, next) => {
         }
 
         restored.push({ id: itemId, type: itemType, name: item.name });
-
-        // Log individual restore activity with bulk group ID
-        const targetType = itemType === 'folder' ? 'folder' : 'file';
-        
-        await ActivityLogModel.logActivity({
-          userId: userId,
-          action: 'BULK_RESTORE',
-          targetType: targetType,
-          targetId: item._id,
-          metadata: {
-            bulkGroupId: bulkGroupId,
-            itemCount: sanitizedIds.length,
-            ...(itemType === 'folder' 
-              ? { folderName: item.name }
-              : { 
-                  fileName: item.name,
-                  fileExtension: ActivityLogModel.getFileExtension(item.name),
-                  fileType: item.mimeType || item.type
-                }
-            )
-          }
-        });
-
       } catch (err) {
         failed.push({ id: itemId, reason: err.message });
       }
@@ -377,14 +319,7 @@ export const bulkRestoreItems = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      data: { 
-        restored, 
-        failed, 
-        total: itemIds.length, 
-        restoredCount: restored.length, 
-        failedCount: failed.length,
-        bulkGroupId: bulkGroupId
-      },
+      data: { restored, failed, total: itemIds.length, restoredCount: restored.length, failedCount: failed.length },
       message: `Restored ${restored.length} of ${itemIds.length} items`,
     });
   } catch (error) {

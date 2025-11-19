@@ -18,14 +18,17 @@ router.use(authenticateUser);
 // Get trash items with pagination
 router.get('/', getTrashItems);
 
+// Bulk restore
+router.post('/restore/bulk', bulkRestoreItems);
+
 // Restore single item
 router.post('/restore/:id', restoreItem);
 
 // Permanently delete single item
 router.delete('/:id', permanentlyDeleteItem);
 
-// Bulk restore
-router.post('/restore/bulk', bulkRestoreItems);
+
+
 
 // Bulk permanently delete
 router.post('/delete/bulk', bulkPermanentlyDeleteItems);

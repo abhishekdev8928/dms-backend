@@ -1,258 +1,366 @@
 import mongoose from 'mongoose';
 
 const activityLogSchema = new mongoose.Schema({
-  // Action details
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: [true, 'User ID is required'],
+    index: true
+  },
+  
   action: {
     type: String,
     required: [true, 'Action is required'],
     enum: [
-      // Department actions
-      'DEPARTMENT_CREATED',
-      'DEPARTMENT_UPDATED',
-      'DEPARTMENT_DELETED',
-      'DEPARTMENT_ACTIVATED',
-      'DEPARTMENT_DEACTIVATED',
-      
-      // Folder actions
       'FOLDER_CREATED',
-      'FOLDER_UPDATED',
+      'FOLDER_RENAMED',
+      'FOLDER_MOVED',
       'FOLDER_DELETED',
       'FOLDER_RESTORED',
-      'FOLDER_MOVED',
-      
-      // Document actions
-      'DOCUMENT_UPLOADED',
-      'DOCUMENT_UPDATED',
-      'DOCUMENT_DELETED',
-      'DOCUMENT_RESTORED',
-      'DOCUMENT_MOVED',
-      'DOCUMENT_DOWNLOADED',
-      'DOCUMENT_VIEWED',
-      
-      // Version actions
-      'VERSION_CREATED',
-      'VERSION_REVERTED',
-      
-      // Tag actions
-      'TAGS_ADDED',
-      'TAGS_REMOVED',
-      
-      // User actions
-      'USER_LOGIN',
-      'USER_LOGOUT',
-      'USER_CREATED',
-      'USER_UPDATED'
+      'FILE_UPLOADED',
+      'FILE_VERSION_UPLOADED',
+      'FILE_RENAMED',
+      'FILE_MOVED',
+      'FILE_DELETED',
+      'FILE_RESTORED',
+      'FILE_DOWNLOADED',
+      'FILE_PREVIEWED',
+      'BULK_RESTORE'
     ],
     index: true
   },
   
-  // Entity information
-  entityType: {
+  targetType: {
     type: String,
-    required: [true, 'Entity type is required'],
-    enum: ['Department', 'Folder', 'Document', 'DocumentVersion', 'User'],
+    required: [true, 'Target type is required'],
+    enum: ['file', 'folder'],
     index: true
   },
-  entityId: {
+  
+  targetId: {
     type: mongoose.Schema.Types.ObjectId,
-    required: [true, 'Entity ID is required'],
-    index: true
-  },
-  entityName: {
-    type: String,
-    trim: true
-    // Store name for quick reference (e.g., folder name, document name)
-  },
-  
-  // User who performed the action
-  performedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: [true, 'User information is required'],
-    index: true
-  },
-  performedByName: {
-    type: String,
-    trim: true
-    // Store user name for quick reference
-  },
-  performedByEmail: {
-    type: String,
-    trim: true,
-    lowercase: true
-  },
-  
-  // Related entities (for context)
-  departmentId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Department',
-    index: true
-  },
-  folderId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Folder',
+    required: [true, 'Target ID is required'],
     index: true
   },
   
-  // Action details
-  description: {
-    type: String,
-    trim: true,
-    maxlength: [500, 'Description cannot exceed 500 characters']
-    // Human-readable description of the action
-  },
-  
-  // Changes made (for update actions)
-  changes: {
-    type: mongoose.Schema.Types.Mixed
-    // Store before/after values for updates
-    // Example: { before: { name: 'Old Name' }, after: { name: 'New Name' } }
-  },
-  
-  // Additional metadata
   metadata: {
-    type: mongoose.Schema.Types.Mixed
-    // Store any additional context (IP address, user agent, etc.)
-  },
-  
-  // Request information
-  ipAddress: {
-    type: String,
-    trim: true
-  },
-  userAgent: {
-    type: String,
-    trim: true
+    oldName: String,
+    newName: String,
+    version: Number,
+    fromFolder: String,
+    toFolder: String,
+    fromFolderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Folder'
+    },
+    toFolderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Folder'
+    },
+    itemCount: Number,
+    bulkGroupId: String,           // For grouping multiple uploads
+    fileName: String,
+    fileExtension: String,
+    folderName: String,
+    fileType: String,
+    parentFolderId: mongoose.Schema.Types.ObjectId,  // NEW: For upload grouping
+    parentFolderName: String       // NEW: For display
   }
 }, {
   timestamps: { createdAt: true, updatedAt: false }
-  // Only track creation time (logs are immutable)
 });
 
-// Indexes for performance
+// Compound indexes
+activityLogSchema.index({ userId: 1, createdAt: -1 });
+activityLogSchema.index({ targetType: 1, targetId: 1, createdAt: -1 });
 activityLogSchema.index({ action: 1, createdAt: -1 });
-activityLogSchema.index({ entityType: 1, entityId: 1, createdAt: -1 });
-activityLogSchema.index({ performedBy: 1, createdAt: -1 });
-activityLogSchema.index({ departmentId: 1, createdAt: -1 });
-activityLogSchema.index({ folderId: 1, createdAt: -1 });
 activityLogSchema.index({ createdAt: -1 });
+activityLogSchema.index({ 'metadata.bulkGroupId': 1 });
 
-// Virtual for formatted date
-activityLogSchema.virtual('createdAtFormatted').get(function() {
-  return this.createdAt.toLocaleString();
-});
+// ============================================
+// STATIC METHODS
+// ============================================
 
-// Virtual for time ago
-activityLogSchema.virtual('timeAgo').get(function() {
-  if (!this.createdAt) return '';
-  
-  const now = new Date();
-  const diff = now - this.createdAt;
-  const seconds = Math.floor(diff / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-  const months = Math.floor(days / 30);
-  const years = Math.floor(days / 365);
-  
-  if (years > 0) return `${years} year${years > 1 ? 's' : ''} ago`;
-  if (months > 0) return `${months} month${months > 1 ? 's' : ''} ago`;
-  if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`;
-  if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
-  if (minutes > 0) return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
-  return 'Just now';
-});
-
-// Static method to create activity log
+/**
+ * Create activity log entry with auto-grouping for uploads
+ */
 activityLogSchema.statics.logActivity = async function(data) {
   try {
+    // Auto-generate bulkGroupId for FILE_UPLOADED actions
+    if (data.action === 'FILE_UPLOADED' && !data.metadata?.bulkGroupId) {
+      // Check if there's a recent upload to the same folder (within 5 seconds)
+      const fiveSecondsAgo = new Date(Date.now() - 5000);
+      
+      const recentUpload = await this.findOne({
+        userId: data.userId,
+        action: 'FILE_UPLOADED',
+        'metadata.parentFolderId': data.metadata?.parentFolderId,
+        createdAt: { $gte: fiveSecondsAgo }
+      }).sort({ createdAt: -1 });
+
+      if (recentUpload && recentUpload.metadata?.bulkGroupId) {
+        // Use existing group
+        if (!data.metadata) data.metadata = {};
+        data.metadata.bulkGroupId = recentUpload.metadata.bulkGroupId;
+      } else {
+        // Create new group
+        if (!data.metadata) data.metadata = {};
+        data.metadata.bulkGroupId = `upload-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      }
+    }
+
     const log = await this.create(data);
     return log;
   } catch (error) {
     console.error('Error creating activity log:', error);
-    // Don't throw error - logging should not break the main flow
     return null;
   }
 };
 
-// Static method to get recent activities
-activityLogSchema.statics.getRecentActivities = function(limit = 50, filters = {}) {
+/**
+ * Get activities with filters and pagination
+ */
+activityLogSchema.statics.getActivities = function(filters = {}, limit = 50) {
   const query = {};
   
-  if (filters.userId) query.performedBy = filters.userId;
-  if (filters.entityType) query.entityType = filters.entityType;
-  if (filters.entityId) query.entityId = filters.entityId;
-  if (filters.departmentId) query.departmentId = filters.departmentId;
+  if (filters.userId) query.userId = filters.userId;
+  if (filters.targetType) query.targetType = filters.targetType;
+  if (filters.targetId) query.targetId = filters.targetId;
   if (filters.action) query.action = filters.action;
+  if (filters.bulkGroupId) query['metadata.bulkGroupId'] = filters.bulkGroupId;
   
   return this.find(query)
     .sort({ createdAt: -1 })
     .limit(limit)
-    .populate('performedBy', 'name email avatar')
+    .populate('userId', 'name email avatar')
     .lean();
 };
 
-// Static method to get user activity
-activityLogSchema.statics.getUserActivity = function(userId, limit = 50) {
-  return this.find({ performedBy: userId })
+/**
+ * Get user's recent activities (GROUPED for display)
+ */
+activityLogSchema.statics.getUserActivities = function(userId, limit = 50) {
+  return this.find({ userId })
     .sort({ createdAt: -1 })
     .limit(limit)
-    .populate('departmentId', 'name')
-    .populate('folderId', 'name')
     .lean();
 };
 
-// Static method to get entity history
-activityLogSchema.statics.getEntityHistory = function(entityType, entityId, limit = 50) {
-  return this.find({ entityType, entityId })
+/**
+ * Get entity history
+ */
+activityLogSchema.statics.getEntityHistory = function(targetType, targetId, limit = 50) {
+  return this.find({ targetType, targetId })
     .sort({ createdAt: -1 })
     .limit(limit)
-    .populate('performedBy', 'name email avatar')
+    .populate('userId', 'name email avatar')
     .lean();
 };
 
-// Static method to get department activity
-activityLogSchema.statics.getDepartmentActivity = function(departmentId, limit = 100) {
-  return this.find({ departmentId })
+/**
+ * Get activities grouped by date AND by bulkGroupId (NEW)
+ */
+activityLogSchema.statics.getGroupedActivities = async function(userId, limit = 100) {
+  const activities = await this.find({ userId })
     .sort({ createdAt: -1 })
     .limit(limit)
-    .populate('performedBy', 'name email avatar')
+    .populate('userId', 'name email avatar')
     .lean();
-};
-
-// Static method to get activity stats
-activityLogSchema.statics.getActivityStats = async function(filters = {}) {
-  const matchStage = {};
   
-  if (filters.startDate || filters.endDate) {
-    matchStage.createdAt = {};
-    if (filters.startDate) matchStage.createdAt.$gte = new Date(filters.startDate);
-    if (filters.endDate) matchStage.createdAt.$lte = new Date(filters.endDate);
-  }
+  // First group by time periods
+  const grouped = {
+    today: [],
+    yesterday: [],
+    lastWeek: [],
+    older: []
+  };
   
-  if (filters.userId) matchStage.performedBy = new mongoose.Types.ObjectId(filters.userId);
-  if (filters.departmentId) matchStage.departmentId = new mongoose.Types.ObjectId(filters.departmentId);
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterdayStart = new Date(todayStart);
+  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+  const lastWeekStart = new Date(todayStart);
+  lastWeekStart.setDate(lastWeekStart.getDate() - 7);
   
-  const stats = await this.aggregate([
-    { $match: matchStage },
-    {
-      $group: {
-        _id: '$action',
-        count: { $sum: 1 }
+  activities.forEach(activity => {
+    const activityDate = new Date(activity.createdAt);
+    
+    if (activityDate >= todayStart) {
+      grouped.today.push(activity);
+    } else if (activityDate >= yesterdayStart) {
+      grouped.yesterday.push(activity);
+    } else if (activityDate >= lastWeekStart) {
+      grouped.lastWeek.push(activity);
+    } else {
+      grouped.older.push(activity);
+    }
+  });
+  
+  // Now collapse FILE_UPLOADED activities with same bulkGroupId
+  const collapseGroups = (activities) => {
+    const result = [];
+    const processedGroups = new Set();
+    
+    for (const activity of activities) {
+      // Check if it's a FILE_UPLOADED with bulkGroupId
+      if (activity.action === 'FILE_UPLOADED' && activity.metadata?.bulkGroupId) {
+        const groupId = activity.metadata.bulkGroupId;
+        
+        // Skip if already processed
+        if (processedGroups.has(groupId)) continue;
+        
+        // Find all activities in this group
+        const groupActivities = activities.filter(
+          a => a.action === 'FILE_UPLOADED' && a.metadata?.bulkGroupId === groupId
+        );
+        
+        if (groupActivities.length > 1) {
+          // Create grouped activity
+          result.push({
+            ...activity,
+            _grouped: true,
+            _groupCount: groupActivities.length,
+            _groupItems: groupActivities.map(a => ({
+              targetId: a.targetId,
+              fileName: a.metadata?.fileName,
+              fileExtension: a.metadata?.fileExtension,
+              fileType: a.metadata?.fileType
+            }))
+          });
+        } else {
+          // Single item, push as-is
+          result.push(activity);
+        }
+        
+        processedGroups.add(groupId);
+      } else {
+        // Non-upload action, push as-is
+        result.push(activity);
       }
-    },
-    { $sort: { count: -1 } }
-  ]);
-  
-  const totalActivities = stats.reduce((sum, stat) => sum + stat.count, 0);
+    }
+    
+    return result;
+  };
   
   return {
-    totalActivities,
-    byAction: stats
+    today: collapseGroups(grouped.today),
+    yesterday: collapseGroups(grouped.yesterday),
+    lastWeek: collapseGroups(grouped.lastWeek),
+    older: collapseGroups(grouped.older)
   };
 };
 
-// Prevent updates to activity logs (immutable)
+/**
+ * Log bulk restore operation
+ */
+activityLogSchema.statics.logBulkRestore = async function(userId, items) {
+  const bulkGroupId = `restore-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  
+  const logs = items.map(item => ({
+    userId,
+    action: 'BULK_RESTORE',
+    targetType: item.type,
+    targetId: item.id,
+    metadata: {
+      bulkGroupId,
+      itemCount: items.length,
+      fileName: item.type === 'file' ? item.name : undefined,
+      fileExtension: item.type === 'file' ? item.extension : undefined,
+      folderName: item.type === 'folder' ? item.name : undefined
+    }
+  }));
+  
+  try {
+    await this.insertMany(logs);
+    return { success: true, bulkGroupId, count: logs.length };
+  } catch (error) {
+    console.error('Error logging bulk restore:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+// ============================================
+// INSTANCE METHODS
+// ============================================
+
+/**
+ * Generate human-readable message (UPDATED)
+ */
+activityLogSchema.methods.getMessage = function() {
+  const { action, metadata, _grouped, _groupCount } = this;
+  
+  // Handle grouped uploads
+  if (_grouped && _groupCount > 1) {
+    const folderName = metadata.parentFolderName || 'a folder';
+    return `You uploaded ${_groupCount} items to ${folderName}`;
+  }
+  
+  switch (action) {
+    case 'FILE_UPLOADED':
+      return `You uploaded ${metadata.fileName}`;
+    
+    case 'FILE_VERSION_UPLOADED':
+      return `You uploaded version ${metadata.version} of ${metadata.fileName}`;
+    
+    case 'FILE_RENAMED':
+      return `You renamed ${metadata.oldName} → ${metadata.newName}`;
+    
+    case 'FILE_MOVED':
+      return `You moved ${metadata.fileName} to ${metadata.toFolder}`;
+    
+    case 'FILE_DELETED':
+      return `You moved ${metadata.fileName} to the bin`;
+    
+    case 'FILE_RESTORED':
+      return `You restored ${metadata.fileName}`;
+    
+    case 'FILE_DOWNLOADED':
+      return `You downloaded ${metadata.fileName}`;
+    
+    case 'FILE_PREVIEWED':
+      return `You previewed ${metadata.fileName}`;
+    
+    case 'FOLDER_CREATED':
+      return `You created folder ${metadata.folderName}`;
+    
+    case 'FOLDER_RENAMED':
+      return `You renamed folder ${metadata.oldName} → ${metadata.newName}`;
+    
+    case 'FOLDER_MOVED':
+      return `You moved folder ${metadata.folderName} into ${metadata.toFolder}`;
+    
+    case 'FOLDER_DELETED':
+      return `You moved folder ${metadata.folderName} to the bin`;
+    
+    case 'FOLDER_RESTORED':
+      return `You restored folder ${metadata.folderName}`;
+    
+    case 'BULK_RESTORE':
+      return `You restored ${metadata.itemCount} items`;
+    
+    default:
+      return 'Unknown action';
+  }
+};
+
+/**
+ * Get formatted timestamp
+ */
+activityLogSchema.methods.getFormattedTime = function() {
+  const date = new Date(this.createdAt);
+  const hours = date.getHours();
+  const minutes = date.getMinutes().toString().padStart(2, '0');
+  const time = `${hours}:${minutes}`;
+  const day = date.getDate();
+  const month = date.toLocaleString('en-US', { month: 'short' });
+  
+  return `${time} · ${day} ${month}`;
+};
+
+// ============================================
+// MIDDLEWARE - Prevent updates
+// ============================================
+
 activityLogSchema.pre('findOneAndUpdate', function(next) {
   next(new Error('Activity logs are immutable and cannot be updated'));
 });
@@ -265,6 +373,15 @@ activityLogSchema.pre('updateMany', function(next) {
   next(new Error('Activity logs are immutable and cannot be updated'));
 });
 
-const ActivityLogModel = mongoose.model('ActivityLog', activityLogSchema);
+// ============================================
+// HELPER
+// ============================================
+activityLogSchema.statics.getFileExtension = function(filename) {
+  if (!filename) return null;
+  const parts = filename.split('.');
+  return parts.length > 1 ? parts.pop().toLowerCase() : null;
+};
 
-export default ActivityLogModel;
+const ActivityLog = mongoose.model('ActivityLog', activityLogSchema);
+
+export default ActivityLog;

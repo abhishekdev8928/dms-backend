@@ -7,6 +7,7 @@ const documentSchema = new mongoose.Schema({
     trim: true,
     maxlength: [255, 'Document name cannot exceed 255 characters']
   },
+
   originalName: {
     type: String,
     required: [true, 'Original filename is required']
@@ -45,16 +46,19 @@ const documentSchema = new mongoose.Schema({
     type: String,
     required: [true, 'File URL is required']
   },
+
   mimeType: {
     type: String,
     required: [true, 'MIME type is required']
   },
+
   extension: {
     type: String,
     required: [true, 'File extension is required'],
     lowercase: true,
     trim: true
   },
+
   size: {
     type: Number,
     required: [true, 'File size is required'],
@@ -66,6 +70,7 @@ const documentSchema = new mongoose.Schema({
     default: 1,
     min: 1
   },
+
   currentVersionId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'DocumentVersion'
@@ -76,6 +81,7 @@ const documentSchema = new mongoose.Schema({
     trim: true,
     maxlength: [1000, 'Description cannot exceed 1000 characters']
   },
+
   tags: [{
     type: String,
     trim: true,
@@ -83,29 +89,41 @@ const documentSchema = new mongoose.Schema({
     maxlength: [50, 'Tag cannot exceed 50 characters']
   }],
 
+  // 🔥 Deletion Tracking
   isDeleted: {
     type: Boolean,
     default: false
   },
+
   deletedAt: {
     type: Date,
     default: null
   },
 
+  deletedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null // <-- NEW FIELD
+  },
+
+  // User Tracking
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: [true, 'Creator information is required']
   },
+
   updatedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }
+
 }, {
   timestamps: true,
   toJSON: { virtuals: true },
   toObject: { virtuals: true }
 });
+
 
 // ✅ Indexes
 documentSchema.index({ parent_id: 1, isDeleted: 1 });
@@ -255,50 +273,72 @@ documentSchema.methods.getParentFolder = async function() {
 };
 
 // ✅ FIXED: Re-upload method - replaces ALL metadata with new file
+// ✅ FIXED: Re-upload method - validates extension and preserves display name
+// 📌 DOCUMENT MODEL — REUPLOAD LOGIC
 documentSchema.methods.reUpload = async function (
   newFileData,
   changeDescription,
   userId
 ) {
+  
+
   const DocumentVersionModel = mongoose.model("DocumentVersion");
   const DocumentModel = mongoose.model("Document");
 
-  // ✅ Determine the type using your helper
+  // 1️⃣ Validate extension
+  const currentExtension = this.extension.toLowerCase();
+  const newExtension = newFileData.extension.toLowerCase();
+
+  if (currentExtension !== newExtension) {
+    throw new Error(
+      `File format mismatch. Expected .${currentExtension} but received .${newExtension}`
+    );
+  }
+
+  // 2️⃣ Determine file type
   const fileType = DocumentModel.getTypeFromMimeType(
     newFileData.mimeType,
     newFileData.extension
   );
 
-  console.log("from here",fileType)
-
-  // ✅ Create a new version with correct type
+  // 3️⃣ Create a new version (🔥 FIXED NAME HANDLING)
   const newVersion = await DocumentVersionModel.createNewVersion(
     this._id,
     {
       ...newFileData,
-      type: fileType, // REQUIRED FIELD
+
+      // NAME RULES:
+      // ✔ "name" = DO NOT TAKE FROM FRONTEND
+      // ✔ Frozen = use main document name
+      name: this.name,
+
+      // ✔ original uploaded filename (correct)
+      originalName: newFileData.originalName,
+
+      type: fileType,
     },
     changeDescription || "File re-uploaded",
     userId
   );
 
-  // ✅ Update main document metadata
-  this.name = newFileData.name;
-  this.originalName = newFileData.originalName;
+  // 4️⃣ Update only metadata (NOT names)
   this.fileUrl = newFileData.fileUrl;
   this.size = newFileData.size;
   this.mimeType = newFileData.mimeType;
-  this.extension = newFileData.extension;
-  this.type = fileType;                    // <-- Fix: document type updates
   this.version = newVersion.versionNumber;
   this.currentVersionId = newVersion._id;
   this.updatedBy = userId;
 
-  await this.buildPath();
+  // ❌ Do NOT change:
+  // this.name
+  // this.originalName
+
   await this.save();
 
   return newVersion;
 };
+
+
 
 
 
@@ -375,53 +415,47 @@ documentSchema.methods.getVersion = async function(versionNumber) {
 //   );
 // };
 
-documentSchema.methods.revertToVersion = async function(versionNumber, userId, session = null) {
+documentSchema.methods.revertToVersion = async function (targetVersionNumber, userId) {
   const DocumentVersion = mongoose.model("DocumentVersion");
 
-  // Find target version
-  const target = await DocumentVersion.findOne({
+  // 1. Get the version to restore from
+  const oldVersion = await DocumentVersion.findOne({
     documentId: this._id,
-    versionNumber
-  }).session(session);
+    versionNumber: targetVersionNumber
+  });
 
-  if (!target) {
-    throw new Error(`Version ${versionNumber} not found`);
-  }
+  if (!oldVersion) throw new Error("Version not found");
 
-  // 1️⃣ Set all versions to not latest
-  await DocumentVersion.updateMany(
-    { documentId: this._id },
-    { $set: { isLatest: false } }
-  ).session(session);
+  // 2. Create NEW version based on old version
+  const newVersion = await DocumentVersion.createNewVersion(
+    this._id,
+    {
+      name: oldVersion.name,
+      originalName: oldVersion.originalName,
+      mimeType: oldVersion.mimeType,
+      extension: oldVersion.extension,
+      size: oldVersion.size,
+      type: oldVersion.type,
+      fileUrl: oldVersion.fileUrl
+    },
+    `Restored from version ${targetVersionNumber}`,
+    userId
+  );
 
-  // 2️⃣ Mark selected version as latest
-  target.isLatest = true;
-  await target.save({ session });
+  // 3. Update Document to reflect this restored version
+  this.name = newVersion.name;
+  this.originalName = newVersion.originalName;
+  this.mimeType = newVersion.mimeType;
+  this.extension = newVersion.extension;
+  this.size = newVersion.size;
+  this.fileUrl = newVersion.fileUrl;
 
-  // 3️⃣ Update main Document fields (file info + type)
-  this.fileUrl = target.fileUrl;
-  this.size = target.size;
-  this.mimeType = target.mimeType;
-  this.extension = target.extension;
-  this.name = target.name;
-  this.originalName = target.originalName;
+  await this.save();
 
-  // ✅ Update type (if your Document has a type field)
-  if (target.type) {
-    this.type = target.type;
-  }
-
-  // Optional: update modifiedBy
-  this.modifiedBy = userId;
-
-  await this.save({ session });
-
-  return {
-    revertedTo: versionNumber,
-    document: this,
-    version: target
-  };
+  return newVersion;
 };
+
+
 
 
 

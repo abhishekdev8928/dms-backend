@@ -319,11 +319,9 @@ export const getFilterTypes = async (req, res) => {
  */
 export const getAllUsers = async (req, res) => {
   try {
-    // Fetch all active users with only the fields needed for display
     const users = await UserModel.find(
-      { isActive: true }, // Only get active users
+      { isActive: true },
       {
-        // Select only required fields
         _id: 1,
         username: 1,
         email: 1,
@@ -332,11 +330,10 @@ export const getAllUsers = async (req, res) => {
         departments: 1,
       }
     )
-      .populate("departments", "name") // If you want to include department names
-      .sort({ createdAt: -1 }) // Sort by newest first
-      .lean(); // Returns plain JavaScript objects (better performance)
+      .populate("departments", "name")
+      .sort({ username: 1 }) // <-- sort alphabetically by username (A-Z)
+      .lean();
 
-    // Transform data to match frontend requirements
     const formattedUsers = users.map((user) => ({
       id: user._id,
       name: user.username,
@@ -360,6 +357,7 @@ export const getAllUsers = async (req, res) => {
     });
   }
 };
+
 
 
 

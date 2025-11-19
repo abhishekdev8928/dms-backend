@@ -218,13 +218,14 @@ documentVersionSchema.methods.markAsLatest = async function (session = null) {
   return this;
 };
 
+// 📌 DOCUMENT VERSION MODEL — CREATE NEW VERSION
 documentVersionSchema.statics.createNewVersion = async function (
   documentId,
   fileData,
   changeDescription,
   userId
 ) {
-  // Make previous latest false
+  // Mark previous versions as not latest
   await this.updateMany(
     { documentId },
     { $set: { isLatest: false } }
@@ -232,7 +233,7 @@ documentVersionSchema.statics.createNewVersion = async function (
 
   console.log("🔥 createNewVersion received fileData:", fileData);
 
-  // NEW VERSION NUMBER
+  // Compute next version number
   const lastVersion = await this.findOne({ documentId }).sort({ versionNumber: -1 });
   const nextVersionNumber = lastVersion ? lastVersion.versionNumber + 1 : 1;
 
@@ -240,13 +241,13 @@ documentVersionSchema.statics.createNewVersion = async function (
   const newVersion = await this.create({
     documentId,
     versionNumber: nextVersionNumber,
-    name: fileData.name,
-    originalName: fileData.originalName,
+    name: fileData.name,             // ✔ Frozen display name
+    originalName: fileData.originalName, // ✔ Uploaded file name
     mimeType: fileData.mimeType,
     extension: fileData.extension,
     size: fileData.size,
     fileUrl: fileData.fileUrl,
-    type: fileData.type,    // 🔥🔥 FIX: THIS MUST BE HERE
+    type: fileData.type,
     isLatest: true,
     createdBy: userId,
     changeDescription
@@ -254,6 +255,7 @@ documentVersionSchema.statics.createNewVersion = async function (
 
   return newVersion;
 };
+
 
 // ✅ FIXED: Only update LATEST version name (for rename operation)
 documentVersionSchema.statics.updateLatestVersionName = async function (

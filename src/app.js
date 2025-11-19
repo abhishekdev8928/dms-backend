@@ -4,6 +4,8 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { sanitizeAndValidateId, sanitizeObjectXSS } from "./utils/helper.js";
 import createHttpError from "http-errors";
+import activityRoutes from './routes/activityRoutes.js';
+
 
 const app = express();
 
@@ -16,6 +18,8 @@ import documentRoutes from "./routes/documentRoutes.js"
 import globalErrorHandler from "./middleware/globalErrorHandler.js";
 import searchRoutes from "./routes/searchRoutes.js";
 import restoreRoutes from "./routes/restoreRoutes.js"
+import { bulkSoftDelete } from "./controller/commonController.js";
+import { authenticateUser } from "./middleware/authMiddleware.js";
 console.log("from here" ,process.env.MONGO_DB_URL)
 app.use(helmet({
   contentSecurityPolicy: {
@@ -124,6 +128,9 @@ const readLimiter = rateLimit({
   }
 });
 
+app.delete('/api/multi/items',authenticateUser, bulkSoftDelete);
+
+
 
 app.use("/api/auth",authLimiter,  authRoutes);
 
@@ -136,7 +143,7 @@ app.use("/api/documents" , documentRoutes);
 app.use("/api/children",treeRoutes);
 
 app.use("/api/trash" , restoreRoutes)
-
+app.use('/api/activity', activityRoutes);
 
 
 app.use("/api/search",searchRoutes)

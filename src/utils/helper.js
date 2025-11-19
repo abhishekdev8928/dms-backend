@@ -23,16 +23,34 @@ export const sanitizeInput = (input) => {
   throw createHttpError(400, 'Invalid input type detected');
 };
 
-// Helper: Sanitize and validate MongoDB ObjectId
-export const sanitizeAndValidateId = (id, fieldName = 'ID') => {
+/**
+ * Single ID validation
+ */
+export const sanitizeAndValidateId = (id, fieldName = "ID") => {
   const sanitized = sanitizeInput(id);
-  
+
   if (!isValidObjectId(sanitized)) {
-    throw createHttpError(400, `Invalid ${fieldName} format`);
+    throw createHttpError(400, `Invalid ${fieldName} format: ${id}`);
   }
-  
+
   return sanitized;
 };
+
+/**
+ * Validate single or multiple IDs
+ */
+export const sanitizeAndValidateIds = (ids, fieldName = "ID") => {
+  if (!ids) {
+    throw createHttpError(400, `${fieldName} is required`);
+  }
+
+  // Always convert to array
+  const idArray = Array.isArray(ids) ? ids : [ids];
+
+  // Validate each ID individually using the single-ID helper
+  return idArray.map(id => sanitizeAndValidateId(id, fieldName));
+};
+
 
 // ===== XSS PREVENTION =====
 
