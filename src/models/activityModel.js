@@ -1,31 +1,121 @@
 import mongoose from 'mongoose';
 
+// ============================================
+// SUBDOCUMENT SCHEMAS
+// ============================================
+
+// Ancestor in the hierarchy (for breadcrumb trail)
+const AncestorSchema = new mongoose.Schema({
+  id: String,
+  name: String,
+  type: {
+    type: String,
+    enum: ['department', 'folder']
+  }
+}, { _id: false });
+
+const TargetSchema = new mongoose.Schema({
+  id: String,
+  name: String,
+  extension: String,
+  type: String,
+  size: Number,
+  path: String,
+  
+  // For renames
+  oldName: String,
+  newName: String,
+  
+  // For moves
+  oldPath: String,
+  newPath: String,
+  oldFolderName: String,
+  newFolderName: String,
+  oldAncestors: [AncestorSchema],
+  newAncestors: [AncestorSchema],
+  
+  // For versions
+  version: Number,
+  
+  // For folder operations
+  folderName: String,
+  folderPath: String
+}, { _id: false });
+
+// Item snapshot for bulk operations
+const ItemSnapshotSchema = new mongoose.Schema({
+  id: String,
+  name: {
+    type: String,
+    required: true
+  },
+  extension: {
+    type: String,
+    default: ''
+  },
+  type: {
+    type: String,
+    default: ''
+  },
+  size: {
+    type: Number,
+    default: 0
+  },
+  folderPath: String,
+  folderName: String
+}, { _id: false });
+
+// Parent folder snapshot (immediate parent only)
+const ParentFolderSnapshotSchema = new mongoose.Schema({
+  id: String,
+  name: String,
+  path: String,
+  type: {
+    type: String,
+    enum: ['folder', 'department'],
+    default: 'folder'
+  }
+}, { _id: false });
+
+// ============================================
+// MAIN ACTIVITY LOG SCHEMA
+// ============================================
+
 const activityLogSchema = new mongoose.Schema({
   userId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
+    type: String,
     required: [true, 'User ID is required'],
     index: true
+  },
+  
+  // 📸 Complete snapshot of user at time of action
+  userSnapshot: {
+    id: String,
+    name: String,
+    email: String,
+    avatar: String
   },
   
   action: {
     type: String,
     required: [true, 'Action is required'],
     enum: [
+      'FILES_UPLOADED',
+      'FILE_UPLOADED',
+      'FILE_VERSION_UPLOADED',
+      'FILE_RENAMED',
+      'FILE_MOVED',
+      'ITEMS_DELETED',
+      'FILE_DELETED',
+      'FILE_RESTORED',
+      'FILE_DOWNLOADED',
+      'FILE_PREVIEWED',
       'FOLDER_CREATED',
       'FOLDER_RENAMED',
       'FOLDER_MOVED',
       'FOLDER_DELETED',
       'FOLDER_RESTORED',
-      'FILE_UPLOADED',
-      'FILE_VERSION_UPLOADED',
-      'FILE_RENAMED',
-      'FILE_MOVED',
-      'FILE_DELETED',
-      'FILE_RESTORED',
-      'FILE_DOWNLOADED',
-      'FILE_PREVIEWED',
-      'BULK_RESTORE'
+      'ITEMS_RESTORED'
     ],
     index: true
   },
@@ -33,145 +123,738 @@ const activityLogSchema = new mongoose.Schema({
   targetType: {
     type: String,
     required: [true, 'Target type is required'],
-    enum: ['file', 'folder'],
+    enum: ['file', 'folder', 'multiple'],
     index: true
   },
   
-  targetId: {
-    type: mongoose.Schema.Types.ObjectId,
-    required: [true, 'Target ID is required'],
-    index: true
-  },
+  // ✅ FIX: Use the TargetSchema defined above
+  target: TargetSchema,
   
-  metadata: {
-    oldName: String,
-    newName: String,
-    version: Number,
-    fromFolder: String,
-    toFolder: String,
-    fromFolderId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Folder'
+  // 📸 Immediate parent folder snapshot
+  parentFolder: ParentFolderSnapshotSchema,
+  
+  // 🆕 Full ancestor chain (from root to immediate parent)
+  ancestors: [AncestorSchema],
+  
+  // 🆕 Full path at time of action (for display and search)
+  fullPath: String,
+  
+  // For bulk operations (multiple files/folders)
+  bulkOperation: {
+    itemCount: {
+      type: Number,
+      default: 0
     },
-    toFolderId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Folder'
-    },
-    itemCount: Number,
-    bulkGroupId: String,           // For grouping multiple uploads
-    fileName: String,
-    fileExtension: String,
-    folderName: String,
-    fileType: String,
-    parentFolderId: mongoose.Schema.Types.ObjectId,  // NEW: For upload grouping
-    parentFolderName: String       // NEW: For display
+    items: [ItemSnapshotSchema]
   }
 }, {
-  timestamps: { createdAt: true, updatedAt: false }
+  timestamps: { createdAt: true, updatedAt: false },
+  collection: 'activitylogs'
 });
 
-// Compound indexes
+if (mongoose.models.ActivityLog) {
+  delete mongoose.models.ActivityLog;
+  delete mongoose.connection.models.ActivityLog;
+}
+
+// ============================================
+// INDEXES
+// ============================================
+
 activityLogSchema.index({ userId: 1, createdAt: -1 });
-activityLogSchema.index({ targetType: 1, targetId: 1, createdAt: -1 });
+activityLogSchema.index({ 'target.id': 1, createdAt: -1 });
 activityLogSchema.index({ action: 1, createdAt: -1 });
 activityLogSchema.index({ createdAt: -1 });
-activityLogSchema.index({ 'metadata.bulkGroupId': 1 });
+activityLogSchema.index({ 'ancestors.id': 1, createdAt: -1 }); // NEW: Query by any ancestor
+activityLogSchema.index({ fullPath: 1, createdAt: -1 }); // NEW: Search by path
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+/**
+ * Get full ancestor chain from root to target entity
+ * @param {String|ObjectId} entityId - Starting entity ID (folder or department)
+ * @returns {Array} Array of ancestors ordered from root to immediate parent
+ */
+async function getAncestorChain(entityId) {
+  if (!entityId) return [];
+  
+  const ancestors = [];
+  const FolderModel = mongoose.model('Folder');
+  const DepartmentModel = mongoose.model('Department');
+  
+  let currentId = entityId;
+  let depth = 0;
+  const MAX_DEPTH = 20; // Prevent infinite loops
+  
+  try {
+    while (currentId && depth < MAX_DEPTH) {
+      // Try to find as Folder first
+      let entity = await FolderModel.findById(currentId)
+        .select('_id name parent_id')
+        .lean();
+      
+      if (entity) {
+        // Add folder to beginning of array (we're walking backwards)
+        ancestors.unshift({
+          id: entity._id.toString(),
+          name: entity.name,
+          type: 'folder'
+        });
+        currentId = entity.parent_id;
+      } else {
+        // Try to find as Department
+        entity = await DepartmentModel.findById(currentId)
+          .select('_id name')
+          .lean();
+        
+        if (entity) {
+          // Add department to beginning
+          ancestors.unshift({
+            id: entity._id.toString(),
+            name: entity.name,
+            type: 'department'
+          });
+          break; // Departments are root level
+        } else {
+          // Entity not found, stop
+          break;
+        }
+      }
+      
+      depth++;
+    }
+    
+    return ancestors;
+  } catch (error) {
+    console.error('Error getting ancestor chain:', error);
+    return [];
+  }
+}
+
+/**
+ * Build full path from ancestors and item name
+ * @param {Array} ancestors - Array of ancestor objects
+ * @param {String} itemName - Name of the item
+ * @returns {String} Full path like "/Engineering/Projects/Q4/file.pdf"
+ */
+function buildFullPath(ancestors, itemName) {
+  if (!ancestors || ancestors.length === 0) {
+    return `/${itemName}`;
+  }
+  
+  const pathParts = ancestors.map(a => a.name);
+  if (itemName) {
+    pathParts.push(itemName);
+  }
+  
+  return '/' + pathParts.join('/');
+}
+
+/**
+ * Get parent folder snapshot from parentId
+ * @param {String|ObjectId} parentId - Parent folder or department ID
+ * @returns {Object} Parent folder snapshot
+ */
+async function getParentFolderSnapshot(parentId) {
+  if (!parentId) return null;
+  
+  const FolderModel = mongoose.model('Folder');
+  const DepartmentModel = mongoose.model('Department');
+  
+  try {
+    // Try to find as Folder first
+    let parent = await FolderModel.findById(parentId).lean();
+    
+    if (parent) {
+      return {
+        id: parent._id.toString(),
+        name: parent.name,
+        path: parent.path,
+        type: 'folder'
+      };
+    }
+    
+    // Try to find as Department
+    parent = await DepartmentModel.findById(parentId).lean();
+    
+    if (parent) {
+      return {
+        id: parent._id.toString(),
+        name: parent.name,
+        path: `/${parent.name}`,
+        type: 'department'
+      };
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error getting parent folder snapshot:', error);
+    return null;
+  }
+}
 
 // ============================================
 // STATIC METHODS
 // ============================================
 
 /**
- * Create activity log entry with auto-grouping for uploads
+ * Log bulk file upload
  */
-activityLogSchema.statics.logActivity = async function(data) {
+/**
+ * FIXED: Log bulk file upload
+ * The issue was in the single file case - target fields should be set individually, not as an object
+ */
+activityLogSchema.statics.logBulkFileUpload = async function(userId, parentId, files, userInfo) {
   try {
-    // Auto-generate bulkGroupId for FILE_UPLOADED actions
-    if (data.action === 'FILE_UPLOADED' && !data.metadata?.bulkGroupId) {
-      // Check if there's a recent upload to the same folder (within 5 seconds)
-      const fiveSecondsAgo = new Date(Date.now() - 5000);
-      
-      const recentUpload = await this.findOne({
-        userId: data.userId,
-        action: 'FILE_UPLOADED',
-        'metadata.parentFolderId': data.metadata?.parentFolderId,
-        createdAt: { $gte: fiveSecondsAgo }
-      }).sort({ createdAt: -1 });
-
-      if (recentUpload && recentUpload.metadata?.bulkGroupId) {
-        // Use existing group
-        if (!data.metadata) data.metadata = {};
-        data.metadata.bulkGroupId = recentUpload.metadata.bulkGroupId;
-      } else {
-        // Create new group
-        if (!data.metadata) data.metadata = {};
-        data.metadata.bulkGroupId = `upload-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      }
+    // Validate inputs
+    if (!userId) {
+      throw new Error('userId is required');
+    }
+    if (!userInfo || (!userInfo.name && !userInfo.username) || !userInfo.email) {
+      throw new Error('userInfo must include name/username and email');
+    }
+    if (!files || !Array.isArray(files) || files.length === 0) {
+      throw new Error('files must be a non-empty array');
     }
 
-    const log = await this.create(data);
+    console.log('🔍 logBulkFileUpload - files count:', files.length);
+
+    // Create user snapshot
+    const userSnapshot = {
+      id: userId.toString(),
+      name: userInfo.name || userInfo.username,
+      email: userInfo.email,
+      avatar: userInfo.avatar || null
+    };
+
+    // Get parent folder snapshot and ancestor chain
+    const parentFolder = await getParentFolderSnapshot(parentId);
+    const ancestors = await getAncestorChain(parentId);
+
+    // Single file - create regular FILE_UPLOADED log
+    if (files.length === 1) {
+      const file = files[0];
+      const fullPath = buildFullPath(ancestors, file.name);
+      
+      const logData = {
+        userId: userId.toString(),
+        userSnapshot,
+        action: 'FILE_UPLOADED',
+        targetType: 'file',
+        target: {
+          id: file.id?.toString() || file._id?.toString(),
+          name: file.name,
+          extension: file.extension || '',
+          type: file.type || '',
+          size: Number(file.size) || 0,
+          path: fullPath
+        },
+        parentFolder,
+        ancestors,
+        fullPath
+      };
+      
+      console.log('✅ Creating single file log');
+      return await this.create(logData);
+    }
+    
+    // Multiple files - create bulk log
+    const items = files.map(f => ({
+      id: f.id?.toString() || f._id?.toString(),
+      name: f.name,
+      extension: f.extension || '',
+      type: f.type || '',
+      size: Number(f.size) || 0,
+      folderPath: parentFolder?.path,
+      folderName: parentFolder?.name
+    }));
+    
+    const fullPath = buildFullPath(ancestors);
+    
+    const logData = {
+      userId: userId.toString(),
+      userSnapshot,
+      action: 'FILES_UPLOADED',
+      targetType: 'multiple',
+      parentFolder,
+      ancestors,
+      fullPath,
+      bulkOperation: {
+        itemCount: files.length,
+        items: items
+      }
+    };
+    
+    console.log('✅ Creating bulk log with', items.length, 'items');
+    
+    const log = await this.create(logData);
+    console.log('✅ Bulk log created successfully:', log._id);
     return log;
   } catch (error) {
-    console.error('Error creating activity log:', error);
-    return null;
+    console.error('❌ Error in logBulkFileUpload:', error);
+    throw error;
   }
 };
 
 /**
- * Get activities with filters and pagination
+ * Log single file upload
  */
-activityLogSchema.statics.getActivities = function(filters = {}, limit = 50) {
-  const query = {};
-  
-  if (filters.userId) query.userId = filters.userId;
-  if (filters.targetType) query.targetType = filters.targetType;
-  if (filters.targetId) query.targetId = filters.targetId;
-  if (filters.action) query.action = filters.action;
-  if (filters.bulkGroupId) query['metadata.bulkGroupId'] = filters.bulkGroupId;
-  
-  return this.find(query)
-    .sort({ createdAt: -1 })
-    .limit(limit)
-    .populate('userId', 'name email avatar')
-    .lean();
+activityLogSchema.statics.logFileUpload = async function(userId, file, parentId, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const parentFolder = await getParentFolderSnapshot(parentId);
+    const ancestors = await getAncestorChain(parentId);
+    const fullPath = buildFullPath(ancestors, file.name);
+
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot: {
+        id: userId.toString(),
+        name: userInfo.name,
+        email: userInfo.email,
+        avatar: userInfo.avatar || null
+      },
+      action: 'FILE_UPLOADED',
+      targetType: 'file',
+      target: {
+        id: file.id?.toString() || file._id?.toString(),
+        name: file.name,
+        extension: file.extension || '',
+        type: file.type || '',
+        size: Number(file.size) || 0,
+        path: fullPath
+      },
+      parentFolder,
+      ancestors,
+      fullPath
+    });
+  } catch (error) {
+    console.error('Error logging file upload:', error);
+    throw error;
+  }
 };
 
 /**
- * Get user's recent activities (GROUPED for display)
+ * Log file rename
  */
-activityLogSchema.statics.getUserActivities = function(userId, limit = 50) {
-  return this.find({ userId })
-    .sort({ createdAt: -1 })
-    .limit(limit)
-    .lean();
+activityLogSchema.statics.logFileRename = async function(userId, file, oldName, newName, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const parentFolder = await getParentFolderSnapshot(file.parent_id);
+    const ancestors = await getAncestorChain(file.parent_id);
+    const fullPath = buildFullPath(ancestors, newName);
+
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot: {
+        id: userId.toString(),
+        name: userInfo.name,
+        email: userInfo.email,
+        avatar: userInfo.avatar || null
+      },
+      action: 'FILE_RENAMED',
+      targetType: 'file',
+      target: {
+        id: file.id?.toString() || file._id?.toString(),
+        oldName: oldName,
+        newName: newName,
+        extension: file.extension || '',
+        type: file.type || '',
+        path: fullPath
+      },
+      parentFolder,
+      ancestors,
+      fullPath
+    });
+  } catch (error) {
+    console.error('Error logging file rename:', error);
+    throw error;
+  }
 };
 
 /**
- * Get entity history
+ * Log file move
  */
-activityLogSchema.statics.getEntityHistory = function(targetType, targetId, limit = 50) {
-  return this.find({ targetType, targetId })
-    .sort({ createdAt: -1 })
-    .limit(limit)
-    .populate('userId', 'name email avatar')
-    .lean();
+activityLogSchema.statics.logFileMove = async function(userId, file, fromParentId, toParentId, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const oldParentFolder = await getParentFolderSnapshot(fromParentId);
+    const newParentFolder = await getParentFolderSnapshot(toParentId);
+    
+    const oldAncestors = await getAncestorChain(fromParentId);
+    const newAncestors = await getAncestorChain(toParentId);
+    
+    const oldPath = buildFullPath(oldAncestors, file.name);
+    const newPath = buildFullPath(newAncestors, file.name);
+
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot: {
+        id: userId.toString(),
+        name: userInfo.name,
+        email: userInfo.email,
+        avatar: userInfo.avatar || null
+      },
+      action: 'FILE_MOVED',
+      targetType: 'file',
+      target: {
+        id: file.id?.toString() || file._id?.toString(),
+        name: file.name,
+        extension: file.extension || '',
+        type: file.type || '',
+        oldPath: oldPath,
+        newPath: newPath,
+        oldFolderName: oldParentFolder?.name || 'root',
+        newFolderName: newParentFolder?.name || 'root',
+        oldAncestors: oldAncestors,
+        newAncestors: newAncestors
+      },
+      parentFolder: newParentFolder, // Current location after move
+      ancestors: newAncestors,
+      fullPath: newPath
+    });
+  } catch (error) {
+    console.error('Error logging file move:', error);
+    throw error;
+  }
 };
 
 /**
- * Get activities grouped by date AND by bulkGroupId (NEW)
+ * Log file deletion
  */
-activityLogSchema.statics.getGroupedActivities = async function(userId, limit = 100) {
-  const activities = await this.find({ userId })
+activityLogSchema.statics.logFileDelete = async function(userId, file, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const parentFolder = await getParentFolderSnapshot(file.parent_id);
+    const ancestors = await getAncestorChain(file.parent_id);
+    const fullPath = buildFullPath(ancestors, file.name);
+
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot: {
+        id: userId.toString(),
+        name: userInfo.name,
+        email: userInfo.email,
+        avatar: userInfo.avatar || null
+      },
+      action: 'FILE_DELETED',
+      targetType: 'file',
+      target: {
+        id: file.id?.toString() || file._id?.toString(),
+        name: file.name,
+        extension: file.extension || '',
+        type: file.type || '',
+        size: Number(file.size) || 0,
+        path: fullPath
+      },
+      parentFolder,
+      ancestors,
+      fullPath
+    });
+  } catch (error) {
+    console.error('Error logging file delete:', error);
+    throw error;
+  }
+};
+
+/**
+ * Log folder creation
+ */
+activityLogSchema.statics.logFolderCreate = async function(userId, folder, parentId, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const parentFolder = await getParentFolderSnapshot(parentId);
+    const ancestors = await getAncestorChain(parentId);
+    const fullPath = buildFullPath(ancestors, folder.name);
+
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot: {
+        id: userId.toString(),
+        name: userInfo.name,
+        email: userInfo.email,
+        avatar: userInfo.avatar || null
+      },
+      action: 'FOLDER_CREATED',
+      targetType: 'folder',
+      target: {
+        id: folder.id?.toString() || folder._id?.toString(),
+        folderName: folder.name,
+        folderPath: fullPath
+      },
+      parentFolder,
+      ancestors,
+      fullPath
+    });
+  } catch (error) {
+    console.error('Error logging folder create:', error);
+    throw error;
+  }
+};
+
+/**
+ * Log folder rename
+ */
+activityLogSchema.statics.logFolderRename = async function(userId, folder, oldName, newName, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const parentFolder = await getParentFolderSnapshot(folder.parent_id);
+    const ancestors = await getAncestorChain(folder.parent_id);
+    const fullPath = buildFullPath(ancestors, newName);
+
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot: {
+        id: userId.toString(),
+        name: userInfo.name,
+        email: userInfo.email,
+        avatar: userInfo.avatar || null
+      },
+      action: 'FOLDER_RENAMED',
+      targetType: 'folder',
+      target: {
+        id: folder.id?.toString() || folder._id?.toString(),
+        oldName: oldName,
+        newName: newName,
+        folderPath: fullPath
+      },
+      parentFolder,
+      ancestors,
+      fullPath
+    });
+  } catch (error) {
+    console.error('Error logging folder rename:', error);
+    throw error;
+  }
+};
+
+/**
+ * Log folder move
+ */
+activityLogSchema.statics.logFolderMove = async function(userId, folder, fromParentId, toParentId, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const oldParentFolder = await getParentFolderSnapshot(fromParentId);
+    const newParentFolder = await getParentFolderSnapshot(toParentId);
+    
+    const oldAncestors = await getAncestorChain(fromParentId);
+    const newAncestors = await getAncestorChain(toParentId);
+    
+    const oldPath = buildFullPath(oldAncestors, folder.name);
+    const newPath = buildFullPath(newAncestors, folder.name);
+
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot: {
+        id: userId.toString(),
+        name: userInfo.name,
+        email: userInfo.email,
+        avatar: userInfo.avatar || null
+      },
+      action: 'FOLDER_MOVED',
+      targetType: 'folder',
+      target: {
+        id: folder.id?.toString() || folder._id?.toString(),
+        folderName: folder.name,
+        oldPath: oldPath,
+        newPath: newPath,
+        oldFolderName: oldParentFolder?.name || 'root',
+        newFolderName: newParentFolder?.name || 'root',
+        oldAncestors: oldAncestors,
+        newAncestors: newAncestors
+      },
+      parentFolder: newParentFolder,
+      ancestors: newAncestors,
+      fullPath: newPath
+    });
+  } catch (error) {
+    console.error('Error logging folder move:', error);
+    throw error;
+  }
+};
+
+/**
+ * Log folder deletion
+ */
+activityLogSchema.statics.logFolderDelete = async function(userId, folder, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const parentFolder = await getParentFolderSnapshot(folder.parent_id);
+    const ancestors = await getAncestorChain(folder.parent_id);
+    const fullPath = buildFullPath(ancestors, folder.name);
+
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot: {
+        id: userId.toString(),
+        name: userInfo.name,
+        email: userInfo.email,
+        avatar: userInfo.avatar || null
+      },
+      action: 'FOLDER_DELETED',
+      targetType: 'folder',
+      target: {
+        id: folder.id?.toString() || folder._id?.toString(),
+        folderName: folder.name,
+        folderPath: fullPath
+      },
+      parentFolder,
+      ancestors,
+      fullPath
+    });
+  } catch (error) {
+    console.error('Error logging folder delete:', error);
+    throw error;
+  }
+};
+
+/**
+ * Log bulk restore operation
+ * FIXED: Now properly handles parent folder and ancestors for multiple items
+ */
+activityLogSchema.statics.logBulkRestore = async function(userId, items, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const userSnapshot = {
+      id: userId.toString(),
+      name: userInfo.name,
+      email: userInfo.email,
+      avatar: userInfo.avatar || null
+    };
+
+    // Single item restore
+    if (items.length === 1) {
+      const item = items[0];
+      const parentFolder = await getParentFolderSnapshot(item.parent_id);
+      const ancestors = await getAncestorChain(item.parent_id);
+      const fullPath = buildFullPath(ancestors, item.name);
+      
+      if (item.type === 'file' || item.itemType === 'file' || item.itemType === 'document') {
+        return await this.create({
+          userId: userId.toString(),
+          userSnapshot,
+          action: 'FILE_RESTORED',
+          targetType: 'file',
+          target: {
+            id: item.id?.toString() || item._id?.toString(),
+            name: item.name,
+            extension: item.extension || '',
+            type: item.type || item.itemType || '',
+            size: Number(item.size) || 0,
+            path: fullPath
+          },
+          parentFolder,
+          ancestors,
+          fullPath
+        });
+      } else {
+        return await this.create({
+          userId: userId.toString(),
+          userSnapshot,
+          action: 'FOLDER_RESTORED',
+          targetType: 'folder',
+          target: {
+            id: item.id?.toString() || item._id?.toString(),
+            folderName: item.name,
+            folderPath: fullPath
+          },
+          parentFolder,
+          ancestors,
+          fullPath
+        });
+      }
+    }
+    
+    // ✅ FIXED: Multiple items restore - now with proper parent folder support
+    // Get the most common parent folder for the bulk operation
+    // (or you could use the first item's parent)
+    const firstItem = items[0];
+    const parentFolder = await getParentFolderSnapshot(firstItem.parent_id);
+    const ancestors = await getAncestorChain(firstItem.parent_id);
+    const fullPath = buildFullPath(ancestors);
+    
+    // Build item snapshots with proper folder information
+    const itemSnapshots = await Promise.all(
+      items.map(async (item) => {
+        // Get each item's specific parent folder info
+        const itemParentFolder = await getParentFolderSnapshot(item.parent_id);
+        const itemAncestors = await getAncestorChain(item.parent_id);
+        
+        return {
+          id: item.id?.toString() || item._id?.toString(),
+          name: item.name,
+          extension: item.extension || '',
+          type: item.itemType || item.type || '',
+          size: Number(item.size) || 0,
+          folderPath: itemParentFolder?.path || item.path || '',
+          folderName: itemParentFolder?.name || 
+                     (item.itemType === 'folder' || item.type === 'folder' ? item.name : null)
+        };
+      })
+    );
+    
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot,
+      action: 'ITEMS_RESTORED',
+      targetType: 'multiple',
+      parentFolder, // ✅ Now included for bulk operations
+      ancestors,     // ✅ Now included for bulk operations
+      fullPath,      // ✅ Now included for bulk operations
+      bulkOperation: {
+        itemCount: items.length,
+        items: itemSnapshots
+      }
+    });
+  } catch (error) {
+    console.error('Error logging bulk restore:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get user's recent activities grouped by time period
+ */
+activityLogSchema.statics.getUserActivities = async function(userId, limit = 100) {
+  const activities = await this.find({ userId: userId.toString() })
     .sort({ createdAt: -1 })
     .limit(limit)
-    .populate('userId', 'name email avatar')
     .lean();
   
-  // First group by time periods
   const grouped = {
     today: [],
     yesterday: [],
     lastWeek: [],
+    lastMonth: [],
     older: []
   };
   
@@ -181,6 +864,8 @@ activityLogSchema.statics.getGroupedActivities = async function(userId, limit = 
   yesterdayStart.setDate(yesterdayStart.getDate() - 1);
   const lastWeekStart = new Date(todayStart);
   lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+  const lastMonthStart = new Date(todayStart);
+  lastMonthStart.setMonth(lastMonthStart.getMonth() - 1);
   
   activities.forEach(activity => {
     const activityDate = new Date(activity.createdAt);
@@ -191,156 +876,213 @@ activityLogSchema.statics.getGroupedActivities = async function(userId, limit = 
       grouped.yesterday.push(activity);
     } else if (activityDate >= lastWeekStart) {
       grouped.lastWeek.push(activity);
+    } else if (activityDate >= lastMonthStart) {
+      grouped.lastMonth.push(activity);
     } else {
       grouped.older.push(activity);
     }
   });
   
-  // Now collapse FILE_UPLOADED activities with same bulkGroupId
-  const collapseGroups = (activities) => {
-    const result = [];
-    const processedGroups = new Set();
-    
-    for (const activity of activities) {
-      // Check if it's a FILE_UPLOADED with bulkGroupId
-      if (activity.action === 'FILE_UPLOADED' && activity.metadata?.bulkGroupId) {
-        const groupId = activity.metadata.bulkGroupId;
-        
-        // Skip if already processed
-        if (processedGroups.has(groupId)) continue;
-        
-        // Find all activities in this group
-        const groupActivities = activities.filter(
-          a => a.action === 'FILE_UPLOADED' && a.metadata?.bulkGroupId === groupId
-        );
-        
-        if (groupActivities.length > 1) {
-          // Create grouped activity
-          result.push({
-            ...activity,
-            _grouped: true,
-            _groupCount: groupActivities.length,
-            _groupItems: groupActivities.map(a => ({
-              targetId: a.targetId,
-              fileName: a.metadata?.fileName,
-              fileExtension: a.metadata?.fileExtension,
-              fileType: a.metadata?.fileType
-            }))
-          });
-        } else {
-          // Single item, push as-is
-          result.push(activity);
-        }
-        
-        processedGroups.add(groupId);
-      } else {
-        // Non-upload action, push as-is
-        result.push(activity);
-      }
-    }
-    
-    return result;
-  };
-  
-  return {
-    today: collapseGroups(grouped.today),
-    yesterday: collapseGroups(grouped.yesterday),
-    lastWeek: collapseGroups(grouped.lastWeek),
-    older: collapseGroups(grouped.older)
-  };
+  return grouped;
 };
 
 /**
- * Log bulk restore operation
+ * Get entity history
  */
-activityLogSchema.statics.logBulkRestore = async function(userId, items) {
-  const bulkGroupId = `restore-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+activityLogSchema.statics.getEntityHistory = function(targetId, limit = 50) {
+  const idString = targetId.toString();
   
-  const logs = items.map(item => ({
-    userId,
-    action: 'BULK_RESTORE',
-    targetType: item.type,
-    targetId: item.id,
-    metadata: {
-      bulkGroupId,
-      itemCount: items.length,
-      fileName: item.type === 'file' ? item.name : undefined,
-      fileExtension: item.type === 'file' ? item.extension : undefined,
-      folderName: item.type === 'folder' ? item.name : undefined
-    }
-  }));
-  
-  try {
-    await this.insertMany(logs);
-    return { success: true, bulkGroupId, count: logs.length };
-  } catch (error) {
-    console.error('Error logging bulk restore:', error);
-    return { success: false, error: error.message };
-  }
+  return this.find({ 
+    $or: [
+      { 'target.id': idString },
+      { 'bulkOperation.items.id': idString }
+    ]
+  })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
 };
 
+/**
+ * Get activities within a specific folder/department (including nested items)
+ */
+activityLogSchema.statics.getActivitiesInFolder = async function(folderId, limit = 100) {
+  const idString = folderId.toString();
+  
+  return await this.find({
+    'ancestors.id': idString
+  })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
+};
+
+/**
+ * Search activities by path
+ */
+activityLogSchema.statics.searchByPath = async function(pathQuery, limit = 100) {
+  return await this.find({
+    fullPath: { $regex: pathQuery, $options: 'i' }
+  })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
+};
+
+
+activityLogSchema.statics.logBulkDelete = async function(userId, items, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const userSnapshot = {
+      id: userId.toString(),
+      name: userInfo.name,
+      email: userInfo.email,
+      avatar: userInfo.avatar || null
+    };
+
+    // Get the most common parent folder for the bulk operation
+    const firstItem = items[0];
+    const parentFolder = await getParentFolderSnapshot(firstItem.parent_id);
+    const ancestors = await getAncestorChain(firstItem.parent_id);
+    const fullPath = buildFullPath(ancestors);
+    
+    // Build item snapshots with proper folder information
+    const itemSnapshots = await Promise.all(
+      items.map(async (item) => {
+        // Get each item's specific parent folder info
+        const itemParentFolder = await getParentFolderSnapshot(item.parent_id);
+        const itemAncestors = await getAncestorChain(item.parent_id);
+        
+        return {
+          id: item.id?.toString() || item._id?.toString(),
+          name: item.name,
+          extension: item.extension || '',
+          type: item.itemType || item.type || '',
+          size: Number(item.size) || 0,
+          folderPath: itemParentFolder?.path || item.path || '',
+          folderName: itemParentFolder?.name || 
+                     (item.itemType === 'folder' || item.type === 'folder' ? item.name : null),
+          // NEW: Include nested items count for folders
+          nestedItemsCount: item.nestedItemsCount || 0
+        };
+      })
+    );
+    
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot,
+      action: 'ITEMS_DELETED', // Use ITEMS_DELETED instead of FILE_DELETED or FOLDER_DELETED
+      targetType: 'multiple',
+      parentFolder,
+      ancestors,
+      fullPath,
+      bulkOperation: {
+        itemCount: items.length,
+        items: itemSnapshots
+      }
+    });
+  } catch (error) {
+    console.error('Error logging bulk delete:', error);
+    throw error;
+  }
+};
 // ============================================
 // INSTANCE METHODS
 // ============================================
 
 /**
- * Generate human-readable message (UPDATED)
+ * Generate human-readable message
  */
 activityLogSchema.methods.getMessage = function() {
-  const { action, metadata, _grouped, _groupCount } = this;
+  const { action, target, bulkOperation, userSnapshot, ancestors } = this;
+  const userName = userSnapshot?.name || 'You';
   
-  // Handle grouped uploads
-  if (_grouped && _groupCount > 1) {
-    const folderName = metadata.parentFolderName || 'a folder';
-    return `You uploaded ${_groupCount} items to ${folderName}`;
-  }
+  // Build location string from ancestors
+  const location = ancestors && ancestors.length > 0 
+    ? ancestors.map(a => a.name).join(' → ')
+    : 'root';
   
   switch (action) {
+    case 'FILES_UPLOADED':
+      return `${userName} uploaded ${bulkOperation.itemCount} items to ${location}`;
+    
     case 'FILE_UPLOADED':
-      return `You uploaded ${metadata.fileName}`;
+      return `${userName} uploaded ${target.name} in ${location}`;
     
     case 'FILE_VERSION_UPLOADED':
-      return `You uploaded version ${metadata.version} of ${metadata.fileName}`;
+      return `${userName} uploaded version ${target.version} of ${target.name}`;
     
     case 'FILE_RENAMED':
-      return `You renamed ${metadata.oldName} → ${metadata.newName}`;
+      return `${userName} renamed ${target.oldName} to ${target.newName}`;
     
     case 'FILE_MOVED':
-      return `You moved ${metadata.fileName} to ${metadata.toFolder}`;
+      const fromLocation = target.oldAncestors && target.oldAncestors.length > 0
+        ? target.oldAncestors.map(a => a.name).join(' → ')
+        : 'root';
+      const toLocation = target.newAncestors && target.newAncestors.length > 0
+        ? target.newAncestors.map(a => a.name).join(' → ')
+        : 'root';
+      return `${userName} moved ${target.name} from ${fromLocation} to ${toLocation}`;
     
     case 'FILE_DELETED':
-      return `You moved ${metadata.fileName} to the bin`;
+      return `${userName} moved ${target.name} to the bin`;
     
     case 'FILE_RESTORED':
-      return `You restored ${metadata.fileName}`;
+      return `${userName} restored ${target.name} to ${location}`;
     
     case 'FILE_DOWNLOADED':
-      return `You downloaded ${metadata.fileName}`;
+      return `${userName} downloaded ${target.name}`;
     
     case 'FILE_PREVIEWED':
-      return `You previewed ${metadata.fileName}`;
+      return `${userName} previewed ${target.name}`;
     
     case 'FOLDER_CREATED':
-      return `You created folder ${metadata.folderName}`;
+      return `${userName} created folder ${target.folderName} in ${location}`;
     
     case 'FOLDER_RENAMED':
-      return `You renamed folder ${metadata.oldName} → ${metadata.newName}`;
+      return `${userName} renamed folder ${target.oldName} to ${target.newName}`;
     
     case 'FOLDER_MOVED':
-      return `You moved folder ${metadata.folderName} into ${metadata.toFolder}`;
+      const folderFromLocation = target.oldAncestors && target.oldAncestors.length > 0
+        ? target.oldAncestors.map(a => a.name).join(' → ')
+        : 'root';
+      const folderToLocation = target.newAncestors && target.newAncestors.length > 0
+        ? target.newAncestors.map(a => a.name).join(' → ')
+        : 'root';
+      return `${userName} moved folder ${target.folderName} from ${folderFromLocation} to ${folderToLocation}`;
     
     case 'FOLDER_DELETED':
-      return `You moved folder ${metadata.folderName} to the bin`;
+      return `${userName} moved folder ${target.folderName} to the bin`;
     
     case 'FOLDER_RESTORED':
-      return `You restored folder ${metadata.folderName}`;
+      return `${userName} restored folder ${target.folderName} to ${location}`;
     
-    case 'BULK_RESTORE':
-      return `You restored ${metadata.itemCount} items`;
+    case 'ITEMS_RESTORED':
+      return `${userName} restored ${bulkOperation.itemCount} items`;
     
     default:
       return 'Unknown action';
   }
+};
+
+/**
+ * Get breadcrumb trail for UI display
+ */
+activityLogSchema.methods.getBreadcrumb = function() {
+  const { ancestors } = this;
+  
+  if (!ancestors || ancestors.length === 0) {
+    return [{ name: 'root', type: 'root' }];
+  }
+  
+  return ancestors.map(a => ({
+    id: a.id,
+    name: a.name,
+    type: a.type
+  }));
 };
 
 /**
@@ -355,6 +1097,47 @@ activityLogSchema.methods.getFormattedTime = function() {
   const month = date.toLocaleString('en-US', { month: 'short' });
   
   return `${time} · ${day} ${month}`;
+};
+
+/**
+ * Get time label
+ */
+activityLogSchema.methods.getTimeLabel = function() {
+  const date = new Date(this.createdAt);
+  const hours = date.getHours().toString().padStart(2, '0');
+  const minutes = date.getMinutes().toString().padStart(2, '0');
+  const day = date.getDate();
+  const month = date.toLocaleString('en-US', { month: 'short' });
+  
+  return `${hours}:${minutes} ${day} ${month}`;
+};
+
+/**
+ * Check if activity is in a specific folder (by checking ancestors)
+ */
+activityLogSchema.methods.isInFolder = function(folderId) {
+  const idString = folderId.toString();
+  return this.ancestors && this.ancestors.some(a => a.id === idString);
+};
+
+/**
+ * Get the deepest ancestor (closest parent in the chain)
+ */
+activityLogSchema.methods.getDeepestAncestor = function() {
+  if (!this.ancestors || this.ancestors.length === 0) {
+    return null;
+  }
+  return this.ancestors[this.ancestors.length - 1];
+};
+
+/**
+ * Get the root ancestor (department level)
+ */
+activityLogSchema.methods.getRootAncestor = function() {
+  if (!this.ancestors || this.ancestors.length === 0) {
+    return null;
+  }
+  return this.ancestors[0];
 };
 
 // ============================================
@@ -374,14 +1157,73 @@ activityLogSchema.pre('updateMany', function(next) {
 });
 
 // ============================================
-// HELPER
+// MODEL EXPORT
 // ============================================
-activityLogSchema.statics.getFileExtension = function(filename) {
-  if (!filename) return null;
-  const parts = filename.split('.');
-  return parts.length > 1 ? parts.pop().toLowerCase() : null;
-};
+
+// Clear any existing model to avoid caching issues
+if (mongoose.models.ActivityLog) {
+  delete mongoose.models.ActivityLog;
+}
 
 const ActivityLog = mongoose.model('ActivityLog', activityLogSchema);
 
 export default ActivityLog;
+
+// ============================================
+// USAGE EXAMPLES
+// ============================================
+
+/*
+// Example 1: Log file upload to nested folder
+await ActivityLog.logFileUpload(
+  userId,
+  {
+    _id: fileId,
+    name: 'report.pdf',
+    extension: 'pdf',
+    type: 'application/pdf',
+    size: 1024000,
+    parent_id: folderId
+  },
+  folderId, // Parent folder ID (Engineering/Projects/Q4)
+  {
+    name: 'John Doe',
+    email: 'john@example.com',
+    avatar: 'avatar.jpg'
+  }
+);
+
+// This will create an activity with:
+// - ancestors: [
+//     { id: 'dept1', name: 'Engineering', type: 'department' },
+//     { id: 'folder1', name: 'Projects', type: 'folder' },
+//     { id: 'folder2', name: 'Q4', type: 'folder' }
+//   ]
+// - fullPath: '/Engineering/Projects/Q4/report.pdf'
+// - getMessage() returns: "John Doe uploaded report.pdf in Engineering → Projects → Q4"
+
+// Example 2: Get all activities in a department (including nested)
+const activities = await ActivityLog.getActivitiesInFolder(departmentId, 50);
+// Returns all activities that happened inside this department or any of its subfolders
+
+// Example 3: Search by path
+const searchResults = await ActivityLog.searchByPath('/Engineering/Projects', 100);
+// Returns all activities with paths containing "/Engineering/Projects"
+
+// Example 4: Get breadcrumb for UI
+const activity = await ActivityLog.findById(activityId);
+const breadcrumb = activity.getBreadcrumb();
+// Returns: [
+//   { id: 'dept1', name: 'Engineering', type: 'department' },
+//   { id: 'folder1', name: 'Projects', type: 'folder' },
+//   { id: 'folder2', name: 'Q4', type: 'folder' }
+// ]
+// You can render this as: Engineering → Projects → Q4
+
+// Example 5: Check if activity is within a specific folder
+const isInFolder = activity.isInFolder(folderId);
+
+// Example 6: Get the department (root ancestor)
+const department = activity.getRootAncestor();
+// Returns: { id: 'dept1', name: 'Engineering', type: 'department' }
+*/

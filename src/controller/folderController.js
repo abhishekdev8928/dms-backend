@@ -1,8 +1,13 @@
+/** 
+ * FOLDER CONTROLLERS - Complete Activity Logging Implementation
+ * ✅ All folder activities logged using new Activity Model static methods
+ * ✅ Proper userInfo object passed (name, email, avatar)
+ */
 import createHttpError from 'http-errors';
 import mongoose from 'mongoose';
 import FolderModel from '../models/folderModel.js';
 import DepartmentModel from '../models/departmentModel.js';
-import ActivityLogModel from '../models/activityModel.js';
+import ActivityLog from '../models/activityModel.js';
 import { 
   sanitizeInputWithXSS, 
   sanitizeAndValidateId,
@@ -23,9 +28,18 @@ import {
 import DocumentModel from '../models/documentModel.js';
 
 /**
- * Create a new folder with activity logging
+ * Helper function to get user info for activity logging
+ */
+const getUserInfo = (user) => ({
+  name: user.name || user.username || 'Unknown User',
+  email: user.email || '',
+  avatar: user.avatar || user.profilePicture || null
+});
+
+/**
+ * ✅ ACTIVITY LOGGED: Create a new folder
  * Route: POST /api/folders
- * Access: Private
+ * Activity: FOLDER_CREATED
  */
 export const createFolder = async (req, res, next) => {
   try {
@@ -78,19 +92,14 @@ export const createFolder = async (req, res, next) => {
       createdBy
     });
 
-    // Log activity - "You created an item in"
-    await ActivityLogModel.logActivity({
-      userId: createdBy,
-      action: 'FOLDER_CREATED',
-      targetType: 'folder',
-      targetId: folder._id,
-      metadata: {
-        folderName: folder.name,
-        // Parent folder info for hierarchical display
-        fromFolder: parent.name,
-        fromFolderId: parent._id
-      }
-    });
+    // ✅ ACTIVITY LOG: FOLDER_CREATED
+    const userInfo = getUserInfo(req.user);
+    await ActivityLog.logFolderCreate(
+      createdBy,
+      folder,
+      sanitizedParentId,
+      userInfo
+    );
 
     res.status(201).json({
       success: true,
@@ -417,7 +426,9 @@ export const getFolderBreadcrumbs = async (req, res, next) => {
 };
 
 /**
- * Update folder with rename activity logging
+ * ✅ ACTIVITY LOGGED: Update folder with rename
+ * Route: PUT /api/folders/:id
+ * Activity: FOLDER_RENAMED (if name changes)
  */
 export const updateFolder = async (req, res, next) => {
   try {
@@ -453,18 +464,15 @@ export const updateFolder = async (req, res, next) => {
       
       await oldFolder.updateDescendantsPaths(oldPath, newPath);
       
-      // Log rename activity - "You renamed an item"
-      await ActivityLogModel.logActivity({
-        userId: updatedBy,
-        action: 'FOLDER_RENAMED',
-        targetType: 'folder',
-        targetId: oldFolder._id,
-        metadata: {
-          oldName: oldName,
-          newName: sanitizedName,
-          folderName: sanitizedName
-        }
-      });
+      // ✅ ACTIVITY LOG: FOLDER_RENAMED
+      const userInfo = getUserInfo(req.user);
+      await ActivityLog.logFolderRename(
+        updatedBy,
+        oldFolder,
+        oldName,
+        sanitizedName,
+        userInfo
+      );
       
       hasChanges = true;
     }
@@ -496,7 +504,9 @@ export const updateFolder = async (req, res, next) => {
 };
 
 /**
- * Move folder with activity logging
+ * ✅ ACTIVITY LOGGED: Move folder
+ * Route: PUT /api/folders/:id/move
+ * Activity: FOLDER_MOVED
  */
 export const moveFolder = async (req, res, next) => {
   try {
@@ -520,38 +530,19 @@ export const moveFolder = async (req, res, next) => {
     }
 
     const oldParentId = folder.parent_id;
-    
-    // Get old parent name
-    let oldParent = await DepartmentModel.findById(oldParentId);
-    if (!oldParent) {
-      oldParent = await FolderModel.findById(oldParentId);
-    }
-    const oldParentName = oldParent?.name || 'Unknown';
 
     // Move the folder
     await folder.moveTo(sanitizedParentId);
 
-    // Get new parent name
-    let newParent = await DepartmentModel.findById(sanitizedParentId);
-    if (!newParent) {
-      newParent = await FolderModel.findById(sanitizedParentId);
-    }
-    const newParentName = newParent?.name || 'Unknown';
-
-    // Log move activity
-    await ActivityLogModel.logActivity({
-      userId: userId,
-      action: 'FOLDER_MOVED',
-      targetType: 'folder',
-      targetId: folder._id,
-      metadata: {
-        folderName: folder.name,
-        fromFolder: oldParentName,
-        toFolder: newParentName,
-        fromFolderId: oldParentId,
-        toFolderId: sanitizedParentId
-      }
-    });
+    // ✅ ACTIVITY LOG: FOLDER_MOVED
+    const userInfo = getUserInfo(req.user);
+    await ActivityLog.logFolderMove(
+      userId,
+      folder,
+      oldParentId,
+      sanitizedParentId,
+      userInfo
+    );
 
     res.status(200).json({
       success: true,
@@ -564,7 +555,9 @@ export const moveFolder = async (req, res, next) => {
 };
 
 /**
- * Soft delete folder with activity logging
+ * ✅ ACTIVITY LOGGED: Soft delete folder
+ * Route: DELETE /api/folders/:id
+ * Activity: FOLDER_DELETED
  */
 export const softDeleteFolder = async (req, res, next) => {
   try {
@@ -588,16 +581,9 @@ export const softDeleteFolder = async (req, res, next) => {
 
     await folder.softDelete();
 
-    // Log delete activity - "You moved an item to the bin"
-    await ActivityLogModel.logActivity({
-      userId: userId,
-      action: 'FOLDER_DELETED',
-      targetType: 'folder',
-      targetId: folder._id,
-      metadata: {
-        folderName: folder.name
-      }
-    });
+    // ✅ ACTIVITY LOG: FOLDER_DELETED
+    const userInfo = getUserInfo(req.user);
+    await ActivityLog.logFolderDelete(userId, folder, userInfo);
 
     res.status(200).json({
       success: true,
@@ -609,7 +595,9 @@ export const softDeleteFolder = async (req, res, next) => {
 };
 
 /**
- * Restore folder with activity logging
+ * ✅ ACTIVITY LOGGED: Restore folder
+ * Route: POST /api/folders/:id/restore
+ * Activity: FOLDER_RESTORED (single item via logBulkRestore)
  */
 export const restoreFolder = async (req, res, next) => {
   try {
@@ -633,16 +621,18 @@ export const restoreFolder = async (req, res, next) => {
 
     await folder.restore();
 
-    // Log restore activity
-    await ActivityLogModel.logActivity({
-      userId: userId,
-      action: 'FOLDER_RESTORED',
-      targetType: 'folder',
-      targetId: folder._id,
-      metadata: {
-        folderName: folder.name
-      }
-    });
+    // ✅ ACTIVITY LOG: FOLDER_RESTORED (via logBulkRestore with single item)
+    const userInfo = getUserInfo(req.user);
+    const item = {
+      id: folder._id,
+      name: folder.name,
+      type: 'folder',
+      itemType: 'folder',
+      path: folder.path,
+      parent_id: folder.parent_id
+    };
+    
+    await ActivityLog.logBulkRestore(userId, [item], userInfo);
 
     res.status(200).json({
       success: true,
@@ -655,9 +645,9 @@ export const restoreFolder = async (req, res, next) => {
 };
 
 /**
- * Bulk restore folders and files
+ * ✅ ACTIVITY LOGGED: Bulk restore folders and files
  * Route: POST /api/folders/bulk-restore
- * Access: Private
+ * Activity: ITEMS_RESTORED (via logBulkRestore)
  */
 export const bulkRestoreFolders = async (req, res, next) => {
   try {
@@ -680,8 +670,11 @@ export const bulkRestoreFolders = async (req, res, next) => {
             await folder.restore();
             restoredItems.push({
               id: folder._id,
+              name: folder.name,
               type: 'folder',
-              name: folder.name
+              itemType: 'folder',
+              path: folder.path,
+              parent_id: folder.parent_id
             });
           }
         } else if (item.type === 'file') {
@@ -690,9 +683,13 @@ export const bulkRestoreFolders = async (req, res, next) => {
             await file.restore();
             restoredItems.push({
               id: file._id,
-              type: 'file',
               name: file.name,
-              extension: ActivityLogModel.getFileExtension(file.name)
+              extension: file.extension || '',
+              type: 'file',
+              itemType: 'file',
+              size: file.size || 0,
+              path: file.path,
+              parent_id: file.parent_id
             });
           }
         }
@@ -705,9 +702,10 @@ export const bulkRestoreFolders = async (req, res, next) => {
       }
     }
 
-    // Log bulk restore activity
+    // ✅ ACTIVITY LOG: ITEMS_RESTORED (bulk restore)
     if (restoredItems.length > 0) {
-      await ActivityLogModel.logBulkRestore(userId, restoredItems);
+      const userInfo = getUserInfo(req.user);
+      await ActivityLog.logBulkRestore(userId, restoredItems, userInfo);
     }
 
     res.status(200).json({

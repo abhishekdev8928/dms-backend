@@ -132,7 +132,7 @@ app.delete('/api/multi/items',authenticateUser, bulkSoftDelete);
 
 
 
-app.use("/api/auth",authLimiter,  authRoutes);
+app.use("/api/auth",  authRoutes);
 
 app.use("/api/departments",  departmentRoutes);
 

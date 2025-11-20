@@ -1,87 +1,183 @@
-/**
- * UPDATED ACTIVITY CONTROLLER
- * ✅ Returns properly formatted grouped activities
- * ✅ Compatible with existing activity model grouping logic
- */
-
-import ActivityLogModel from '../models/activityModel.js';
+import ActivityLog from '../models/activityModel.js';
 import mongoose from 'mongoose';
 
-/**
- * Get user's activities grouped by date with upload grouping
- * Route: GET /api/activities/user/:userId
- * Route: GET /api/activities/grouped (if using req.user.id)
- */
-export const getUserActivitiesGrouped = async (req, res) => {
-  try {
-    // Support both path param and authenticated user
-    const userId = req.params.userId || req.user?.id;
-    const { limit = 100 } = req.query;
+// ============================================
+// HELPER: Get User Info for Snapshot
+// ============================================
+const getUserSnapshot = (user) => {
+  if (!user) return null;
 
-    // Validate userId
-    if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
-      return res.status(400).json({
+  return {
+    id: user._id?.toString() || user.id?.toString(),
+    name: user.username || user.name,
+    email: user.email,
+    avatar: user.profilePic || user.avatar || null
+  };
+};
+
+// ============================================
+// POST CONTROLLER - Only Bulk Upload
+// ============================================
+
+/**
+ * @route   POST /api/activity/bulk-upload
+ * @desc    Log bulk file upload after successful uploads
+ * @access  Private
+ */
+export const logBulkFileUpload = async (req, res) => {
+  try {
+    console.log("user details", req.user);
+    let { parentId, files } = req.body; 
+    
+    console.log('📥 Raw request body:', JSON.stringify(req.body, null, 2));
+    console.log('📥 Files type:', typeof files);
+    console.log('📥 Files value:', files);
+    
+    const userId = req.user?._id || req.user?.id;
+    
+    if (!userId) {
+      return res.status(401).json({
         success: false,
-        message: 'Invalid or missing user ID'
+        message: 'User not authenticated'
       });
     }
 
-    // Get grouped activities using model method
-    const grouped = await ActivityLogModel.getGroupedActivities(userId, parseInt(limit));
-
-    // Enrich each activity with formatted message and time
-    const enrichActivities = (activities) => {
-      return activities.map(activity => {
-        // Create model instance to use instance methods
-        const activityDoc = new ActivityLogModel(activity);
-        
-        return {
-          _id: activity._id,
-          action: activity.action,
-          targetType: activity.targetType,
-          targetId: activity.targetId,
-          metadata: activity.metadata,
-          createdAt: activity.createdAt,
-          user: activity.userId,
-          
-          // Formatted fields
-          message: activityDoc.getMessage(),
-          formattedTime: activityDoc.getFormattedTime(),
-          
-          // Grouping fields (if grouped upload)
-          ...(activity._grouped && {
-            _grouped: true,
-            _groupCount: activity._groupCount,
-            _groupItems: activity._groupItems
-          })
-        };
+    // Validate parentId
+    if (!parentId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Parent ID is required'
       });
+    }
+
+    // Parse files if it's a stringified array
+    if (typeof files === 'string') {
+      try {
+        console.log('⚠️ Files is a string, parsing...');
+        files = JSON.parse(files);
+        console.log('✅ Parsed files:', files);
+      } catch (parseError) {
+        console.error('❌ Failed to parse files:', parseError);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid files format'
+        });
+      }
+    }
+
+    // Validation
+    if (!files || !Array.isArray(files) || files.length === 0) {
+      console.error('❌ Files validation failed:', { files, isArray: Array.isArray(files) });
+      return res.status(400).json({
+        success: false,
+        message: 'Files array is required and cannot be empty'
+      });
+    }
+
+    // Validate file structure
+    const invalidFiles = files.filter(f => !f.id && !f._id || !f.name);
+    if (invalidFiles.length > 0) {
+      console.error('❌ Invalid files found:', invalidFiles);
+      return res.status(400).json({
+        success: false,
+        message: 'Each file must have id and name',
+        invalidFiles
+      });
+    }
+
+    console.log('✅ Validation passed, logging activity...');
+    
+    // Get user snapshot
+    const userInfo = getUserSnapshot(req.user);
+    
+    // Log bulk upload
+    const log = await ActivityLog.logBulkFileUpload(
+      userId,
+      parentId,
+      files,
+      userInfo
+    );
+
+    console.log('✅ Activity logged successfully:', log._id);
+
+    res.status(201).json({
+      success: true,
+      message: 'Bulk upload logged successfully',
+      data: {
+        logId: log._id,
+        action: log.action,
+        itemCount: log.bulkOperation?.itemCount || files.length,
+        message: log.getMessage(),
+        timestamp: log.createdAt
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error logging bulk upload:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to log bulk upload',
+      error: error.message
+    });
+  }
+};
+
+// ============================================
+// GET CONTROLLERS - Fetching Activity Logs
+// ============================================
+
+/**
+ * @route   GET /api/activity/user
+ * @desc    Get authenticated user's activities grouped by date
+ * @access  Private
+ */
+export const getUserActivitiesGrouped = async (req, res) => {
+  try {
+    const userId = req.user?._id || req.user?.id;
+    const limit = parseInt(req.query.limit) || 100;
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated'
+      });
+    }
+
+    const groupedActivities = await ActivityLog.getUserActivities(userId, limit);
+
+    // Format activities
+    const formatActivities = (activities) => {
+      return activities.map(activity => ({
+        ...activity,
+        user: activity.userSnapshot || { name: 'You' },
+        message: new ActivityLog(activity).getMessage(),
+        timeLabel: new ActivityLog(activity).getTimeLabel(),
+        formattedTime: new ActivityLog(activity).getFormattedTime()
+      }));
     };
 
     const response = {
-      success: true,
-      data: {
-        today: enrichActivities(grouped.today),
-        yesterday: enrichActivities(grouped.yesterday),
-        lastWeek: enrichActivities(grouped.lastWeek),
-        older: enrichActivities(grouped.older)
-      },
-      meta: {
-        totalCount: 
-          grouped.today.length + 
-          grouped.yesterday.length + 
-          grouped.lastWeek.length + 
-          grouped.older.length,
-        groupedUploads: grouped.today
-          .concat(grouped.yesterday, grouped.lastWeek, grouped.older)
-          .filter(a => a._grouped).length
-      }
+      today: formatActivities(groupedActivities.today),
+      yesterday: formatActivities(groupedActivities.yesterday),
+      lastWeek: formatActivities(groupedActivities.lastWeek),
+      lastMonth: formatActivities(groupedActivities.lastMonth),
+      older: formatActivities(groupedActivities.older)
     };
 
-    return res.status(200).json(response);
+    res.status(200).json({
+      success: true,
+      data: response,
+      totalActivities: 
+        groupedActivities.today.length +
+        groupedActivities.yesterday.length +
+        groupedActivities.lastWeek.length +
+        groupedActivities.lastMonth.length +
+        groupedActivities.older.length
+    });
+
   } catch (error) {
     console.error('Error fetching user activities:', error);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: 'Failed to fetch user activities',
       error: error.message
@@ -90,56 +186,41 @@ export const getUserActivitiesGrouped = async (req, res) => {
 };
 
 /**
- * Get activity for a specific file (document)
- * Route: GET /api/activities/file/:fileId
+ * @route   GET /api/activity/file/:fileId
+ * @desc    Get complete activity history for a specific file
+ * @access  Private
  */
 export const getFileActivity = async (req, res) => {
   try {
     const { fileId } = req.params;
-    const { limit = 50 } = req.query;
+    const limit = parseInt(req.query.limit) || 50;
 
     if (!mongoose.Types.ObjectId.isValid(fileId)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid file ID'
+        message: 'Invalid file ID format'
       });
     }
 
-    const activities = await ActivityLogModel.find({
-      targetType: 'file',
-      targetId: fileId
-    })
-      .sort({ createdAt: -1 })
-      .limit(parseInt(limit))
-      .populate('userId', 'name email avatar')
-      .lean();
+    const activities = await ActivityLog.getEntityHistory(fileId, limit);
 
-    const enrichedActivities = activities.map(activity => {
-      const activityDoc = new ActivityLogModel(activity);
-      return {
-        _id: activity._id,
-        action: activity.action,
-        targetType: activity.targetType,
-        targetId: activity.targetId,
-        metadata: activity.metadata,
-        createdAt: activity.createdAt,
-        message: activityDoc.getMessage(),
-        formattedTime: activityDoc.getFormattedTime(),
-        user: activity.userId
-      };
-    });
+    const formattedActivities = activities.map(activity => ({
+      ...activity,
+      user: activity.userSnapshot || { name: 'Unknown User' },
+      message: new ActivityLog(activity).getMessage(),
+      timeLabel: new ActivityLog(activity).getTimeLabel(),
+      formattedTime: new ActivityLog(activity).getFormattedTime()
+    }));
 
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
-      data: {
-        fileId,
-        activities: enrichedActivities,
-        count: enrichedActivities.length
-      }
+      data: formattedActivities,
+      count: formattedActivities.length
     });
+
   } catch (error) {
     console.error('Error fetching file activity:', error);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: 'Failed to fetch file activity',
       error: error.message
@@ -148,74 +229,68 @@ export const getFileActivity = async (req, res) => {
 };
 
 /**
- * Get activity for a specific folder
- * Route: GET /api/activities/folder/:folderId
+ * @route   GET /api/activity/folder/:folderId
+ * @desc    Get complete activity history for a specific folder
+ * @access  Private
  */
 export const getFolderActivity = async (req, res) => {
   try {
     const { folderId } = req.params;
-    const { limit = 50, actionType } = req.query;
+    const limit = parseInt(req.query.limit) || 50;
+    const actionType = req.query.actionType;
 
     if (!mongoose.Types.ObjectId.isValid(folderId)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid folder ID'
+        message: 'Invalid folder ID format'
       });
     }
 
+    const folderIdString = folderId.toString();
+    
     const query = {
-      targetType: 'folder',
-      targetId: folderId
+      $or: [
+        // Direct folder operations
+        { targetType: 'folder', 'target.id': folderIdString },
+        
+        // Files/folders in this folder via parentFolder snapshot
+        { 'parentFolder.id': folderIdString },
+        
+        // Bulk operations
+        { 'bulkOperation.items.folderPath': new RegExp(`/${folderId}`) }
+      ]
     };
 
     if (actionType) {
       query.action = actionType;
     }
 
-    const activities = await ActivityLogModel.find(query)
+    const activities = await ActivityLog.find(query)
       .sort({ createdAt: -1 })
-      .limit(parseInt(limit))
-      .populate('userId', 'name email avatar')
+      .limit(limit)
       .lean();
 
-    const enrichedActivities = activities.map(activity => {
-      const activityDoc = new ActivityLogModel(activity);
+    const formattedActivities = activities.map(activity => {
+      const activityInstance = new ActivityLog(activity);
       return {
-        _id: activity._id,
-        action: activity.action,
-        targetType: activity.targetType,
-        targetId: activity.targetId,
-        metadata: activity.metadata,
-        createdAt: activity.createdAt,
-        message: activityDoc.getMessage(),
-        formattedTime: activityDoc.getFormattedTime(),
-        user: activity.userId
+        ...activity,
+        user: activity.userSnapshot || { name: 'Unknown User' },
+        message: activityInstance.getMessage(),
+        timeLabel: activityInstance.getTimeLabel(),
+        formattedTime: activityInstance.getFormattedTime()
       };
     });
 
-    const actionBreakdown = await ActivityLogModel.aggregate([
-      { $match: query },
-      {
-        $group: {
-          _id: '$action',
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { count: -1 } }
-    ]);
-
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
-      data: {
-        folderId,
-        activities: enrichedActivities,
-        count: enrichedActivities.length,
-        actionBreakdown
-      }
+      data: formattedActivities,
+      count: formattedActivities.length,
+      folderId: folderId
     });
+
   } catch (error) {
     console.error('Error fetching folder activity:', error);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: 'Failed to fetch folder activity',
       error: error.message
@@ -224,129 +299,62 @@ export const getFolderActivity = async (req, res) => {
 };
 
 /**
- * Get activities by bulk group ID (for expanded view)
- * Route: GET /api/activities/bulk/:bulkGroupId
- */
-export const getBulkGroupActivities = async (req, res) => {
-  try {
-    const { bulkGroupId } = req.params;
-
-    const activities = await ActivityLogModel.find({
-      'metadata.bulkGroupId': bulkGroupId
-    })
-      .sort({ createdAt: -1 })
-      .populate('userId', 'name email avatar')
-      .lean();
-
-    if (activities.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'No activities found for this bulk group ID'
-      });
-    }
-
-    const enrichedActivities = activities.map(activity => {
-      const activityDoc = new ActivityLogModel(activity);
-      return {
-        _id: activity._id,
-        action: activity.action,
-        targetType: activity.targetType,
-        targetId: activity.targetId,
-        metadata: activity.metadata,
-        createdAt: activity.createdAt,
-        message: activityDoc.getMessage(),
-        formattedTime: activityDoc.getFormattedTime(),
-        user: activity.userId
-      };
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        bulkGroupId,
-        activities: enrichedActivities,
-        totalItems: activities[0]?.metadata?.itemCount || activities.length,
-        count: enrichedActivities.length
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching bulk group activities:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch bulk group activities',
-      error: error.message
-    });
-  }
-};
-
-/**
- * Get recent activities across the system
- * Route: GET /api/activities/recent
+ * @route   GET /api/activity/recent
+ * @desc    Get recent activities with optional filters
+ * @access  Private
  */
 export const getRecentActivities = async (req, res) => {
   try {
-    const { 
-      limit = 50, 
-      page = 1,
-      userId,
-      actionType,
-      targetType
-    } = req.query;
-
+    const limit = parseInt(req.query.limit) || 50;
+    const page = parseInt(req.query.page) || 1;
     const skip = (page - 1) * limit;
-    const filters = {};
-    
-    if (userId && mongoose.Types.ObjectId.isValid(userId)) {
-      filters.userId = userId;
-    }
-    
-    if (actionType) {
-      filters.action = actionType;
-    }
-    
-    if (targetType) {
-      filters.targetType = targetType;
+    const { actionType, targetType } = req.query;
+    const userId = req.user?._id || req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated'
+      });
     }
 
-    const activities = await ActivityLogModel.find(filters)
-      .sort({ createdAt: -1 })
-      .limit(parseInt(limit))
-      .skip(skip)
-      .populate('userId', 'name email avatar')
-      .lean();
+    const query = { userId: userId.toString() };
+    if (actionType) query.action = actionType;
+    if (targetType) query.targetType = targetType;
 
-    const totalCount = await ActivityLogModel.countDocuments(filters);
+    const [activities, totalCount] = await Promise.all([
+      ActivityLog.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      ActivityLog.countDocuments(query)
+    ]);
 
-    const enrichedActivities = activities.map(activity => {
-      const activityDoc = new ActivityLogModel(activity);
-      return {
-        _id: activity._id,
-        action: activity.action,
-        targetType: activity.targetType,
-        targetId: activity.targetId,
-        metadata: activity.metadata,
-        createdAt: activity.createdAt,
-        message: activityDoc.getMessage(),
-        formattedTime: activityDoc.getFormattedTime(),
-        user: activity.userId
-      };
-    });
+    const formattedActivities = activities.map(activity => ({
+      ...activity,
+      user: activity.userSnapshot || { name: 'Unknown User' },
+      message: new ActivityLog(activity).getMessage(),
+      timeLabel: new ActivityLog(activity).getTimeLabel(),
+      formattedTime: new ActivityLog(activity).getFormattedTime()
+    }));
 
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
-      data: {
-        activities: enrichedActivities,
-        pagination: {
-          total: totalCount,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          totalPages: Math.ceil(totalCount / limit)
-        }
+      data: formattedActivities,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalCount / limit),
+        totalItems: totalCount,
+        itemsPerPage: limit,
+        hasNextPage: page < Math.ceil(totalCount / limit),
+        hasPrevPage: page > 1
       }
     });
+
   } catch (error) {
     console.error('Error fetching recent activities:', error);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: 'Failed to fetch recent activities',
       error: error.message
@@ -355,53 +363,66 @@ export const getRecentActivities = async (req, res) => {
 };
 
 /**
- * Get activity statistics
- * Route: GET /api/activities/stats
+ * @route   GET /api/activity/stats
+ * @desc    Get activity statistics and breakdowns
+ * @access  Private
  */
 export const getActivityStats = async (req, res) => {
   try {
-    const { startDate, endDate, userId, targetType } = req.query;
+    const { startDate, endDate, targetType } = req.query;
+    const userId = req.user?._id || req.user?.id;
 
-    const filters = {};
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated'
+      });
+    }
+
+    const query = { userId: userId.toString() };
     
     if (startDate || endDate) {
-      filters.createdAt = {};
-      if (startDate) filters.createdAt.$gte = new Date(startDate);
-      if (endDate) filters.createdAt.$lte = new Date(endDate);
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
     }
     
-    if (userId && mongoose.Types.ObjectId.isValid(userId)) {
-      filters.userId = mongoose.Types.ObjectId(userId);
-    }
-    
-    if (targetType) {
-      filters.targetType = targetType;
-    }
+    if (targetType) query.targetType = targetType;
 
-    const actionBreakdown = await ActivityLogModel.aggregate([
-      { $match: filters },
+    const stats = await ActivityLog.aggregate([
+      { $match: query },
       {
         $group: {
           _id: '$action',
-          count: { $sum: 1 }
+          count: { $sum: 1 },
+          lastActivity: { $max: '$createdAt' }
         }
       },
       { $sort: { count: -1 } }
     ]);
 
-    const targetTypeBreakdown = await ActivityLogModel.aggregate([
-      { $match: filters },
+    const totalActivities = await ActivityLog.countDocuments(query);
+
+    const typeBreakdown = await ActivityLog.aggregate([
+      { $match: query },
       {
         $group: {
           _id: '$targetType',
           count: { $sum: 1 }
         }
-      },
-      { $sort: { count: -1 } }
+      }
     ]);
 
-    const dailyTrend = await ActivityLogModel.aggregate([
-      { $match: filters },
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    
+    const recentTrend = await ActivityLog.aggregate([
+      { 
+        $match: { 
+          userId: userId.toString(),
+          createdAt: { $gte: sevenDaysAgo }
+        }
+      },
       {
         $group: {
           _id: {
@@ -410,26 +431,22 @@ export const getActivityStats = async (req, res) => {
           count: { $sum: 1 }
         }
       },
-      { $sort: { _id: -1 } },
-      { $limit: 30 }
+      { $sort: { _id: 1 } }
     ]);
 
-    const totalActivities = await ActivityLogModel.countDocuments(filters);
-    const uniqueUsers = await ActivityLogModel.distinct('userId', filters);
-
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
       data: {
         totalActivities,
-        uniqueUsers: uniqueUsers.length,
-        actionBreakdown,
-        targetTypeBreakdown,
-        dailyTrend: dailyTrend.reverse()
+        actionBreakdown: stats,
+        typeBreakdown,
+        recentTrend
       }
     });
+
   } catch (error) {
     console.error('Error fetching activity stats:', error);
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message: 'Failed to fetch activity statistics',
       error: error.message
@@ -438,149 +455,90 @@ export const getActivityStats = async (req, res) => {
 };
 
 /**
- * Search activities
- * Route: GET /api/activities/search
+ * @route   GET /api/activity/search
+ * @desc    Search activities with filters
+ * @access  Private
  */
 export const searchActivities = async (req, res) => {
   try {
     const { 
-      query,
-      action,
-      targetType,
-      userId,
-      startDate,
-      endDate,
-      limit = 50,
-      page = 1
+      query: searchQuery, 
+      action, 
+      targetType, 
+      startDate, 
+      endDate 
     } = req.query;
-
+    const limit = parseInt(req.query.limit) || 50;
+    const page = parseInt(req.query.page) || 1;
     const skip = (page - 1) * limit;
-    const filters = {};
+    const userId = req.user?._id || req.user?.id;
 
-    if (action) {
-      filters.action = action;
-    }
-
-    if (targetType) {
-      filters.targetType = targetType;
-    }
-
-    if (userId && mongoose.Types.ObjectId.isValid(userId)) {
-      filters.userId = userId;
-    }
-
-    if (startDate || endDate) {
-      filters.createdAt = {};
-      if (startDate) filters.createdAt.$gte = new Date(startDate);
-      if (endDate) filters.createdAt.$lte = new Date(endDate);
-    }
-
-    if (query) {
-      filters.$or = [
-        { 'metadata.fileName': { $regex: query, $options: 'i' } },
-        { 'metadata.folderName': { $regex: query, $options: 'i' } },
-        { 'metadata.oldName': { $regex: query, $options: 'i' } },
-        { 'metadata.newName': { $regex: query, $options: 'i' } }
-      ];
-    }
-
-    const activities = await ActivityLogModel.find(filters)
-      .sort({ createdAt: -1 })
-      .limit(parseInt(limit))
-      .skip(skip)
-      .populate('userId', 'name email avatar')
-      .lean();
-
-    const totalCount = await ActivityLogModel.countDocuments(filters);
-
-    const enrichedActivities = activities.map(activity => {
-      const activityDoc = new ActivityLogModel(activity);
-      return {
-        _id: activity._id,
-        action: activity.action,
-        targetType: activity.targetType,
-        targetId: activity.targetId,
-        metadata: activity.metadata,
-        createdAt: activity.createdAt,
-        message: activityDoc.getMessage(),
-        formattedTime: activityDoc.getFormattedTime(),
-        user: activity.userId
-      };
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        activities: enrichedActivities,
-        pagination: {
-          total: totalCount,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          totalPages: Math.ceil(totalCount / limit)
-        }
-      }
-    });
-  } catch (error) {
-    console.error('Error searching activities:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to search activities',
-      error: error.message
-    });
-  }
-};
-
-/**
- * TEST ENDPOINT: Check grouped activity data structure
- * Route: GET /api/activities/test/grouped
- * This endpoint helps verify the JSON structure
- */
-export const testGroupedActivities = async (req, res) => {
-  try {
-    const userId = req.user?.id || req.query.userId;
-    
     if (!userId) {
-      return res.status(400).json({
+      return res.status(401).json({
         success: false,
-        message: 'User ID required (as query param or authenticated user)'
+        message: 'User not authenticated'
       });
     }
 
-    const grouped = await ActivityLogModel.getGroupedActivities(userId, 10);
-    
-    // Show raw structure
-    const sampleActivity = grouped.today[0] || grouped.yesterday[0] || grouped.lastWeek[0];
-    
-    return res.status(200).json({
+    const query = { userId: userId.toString() };
+
+    if (action) query.action = action;
+    if (targetType) query.targetType = targetType;
+
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+
+    if (searchQuery) {
+      query.$or = [
+        { 'target.name': { $regex: searchQuery, $options: 'i' } },
+        { 'target.folderName': { $regex: searchQuery, $options: 'i' } },
+        { 'target.oldName': { $regex: searchQuery, $options: 'i' } },
+        { 'target.newName': { $regex: searchQuery, $options: 'i' } },
+        { 'target.path': { $regex: searchQuery, $options: 'i' } },
+        { 'parentFolder.name': { $regex: searchQuery, $options: 'i' } },
+        { 'parentFolder.path': { $regex: searchQuery, $options: 'i' } },
+        { 'bulkOperation.items.name': { $regex: searchQuery, $options: 'i' } }
+      ];
+    }
+
+    const [activities, totalCount] = await Promise.all([
+      ActivityLog.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      ActivityLog.countDocuments(query)
+    ]);
+
+    const formattedActivities = activities.map(activity => ({
+      ...activity,
+      user: activity.userSnapshot || { name: 'Unknown User' },
+      message: new ActivityLog(activity).getMessage(),
+      timeLabel: new ActivityLog(activity).getTimeLabel(),
+      formattedTime: new ActivityLog(activity).getFormattedTime()
+    }));
+
+    res.status(200).json({
       success: true,
-      message: 'Test data for grouped activities',
-      data: {
-        groupedData: grouped,
-        sampleActivity: sampleActivity ? {
-          _id: sampleActivity._id,
-          action: sampleActivity.action,
-          targetType: sampleActivity.targetType,
-          metadata: sampleActivity.metadata,
-          _grouped: sampleActivity._grouped,
-          _groupCount: sampleActivity._groupCount,
-          _groupItems: sampleActivity._groupItems
-        } : null,
-        counts: {
-          today: grouped.today.length,
-          yesterday: grouped.yesterday.length,
-          lastWeek: grouped.lastWeek.length,
-          older: grouped.older.length
-        },
-        groupedUploadsCount: grouped.today
-          .concat(grouped.yesterday, grouped.lastWeek, grouped.older)
-          .filter(a => a._grouped).length
+      data: formattedActivities,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(totalCount / limit),
+        totalItems: totalCount,
+        itemsPerPage: limit,
+        hasNextPage: page < Math.ceil(totalCount / limit),
+        hasPrevPage: page > 1
       }
     });
+
   } catch (error) {
-    console.error('Error in test endpoint:', error);
-    return res.status(500).json({
+    console.error('Error searching activities:', error);
+    res.status(500).json({
       success: false,
-      message: 'Test endpoint failed',
+      message: 'Failed to search activities',
       error: error.message
     });
   }

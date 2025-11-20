@@ -12,6 +12,32 @@ import {
 } from '../utils/helper.js';
 import { bulkRestoreSchema } from '../validation/commonValidation.js';
 
+const getParentFolderInfo = async (parentId) => {
+  if (!parentId) return null;
+
+  try {
+    const FolderModelRef = mongoose.model('Folder');
+    const DepartmentModel = mongoose.model('Department');
+
+    let parent = await FolderModelRef.findById(parentId);
+    if (!parent) {
+      parent = await DepartmentModel.findById(parentId);
+    }
+
+    if (parent) {
+      return {
+        id: parent._id.toString(),
+        name: parent.name,
+        path: parent.path || '/'
+      };
+    }
+  } catch (error) {
+    console.error('Error fetching parent folder:', error);
+  }
+
+  return null;
+};
+
 /**
  * Get all deleted items (folders + documents) with pagination
  * Route: GET /api/trash

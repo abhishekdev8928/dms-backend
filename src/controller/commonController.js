@@ -17,6 +17,7 @@ const bulkDeleteSchema = z.object({
 /**
  * Unified soft delete endpoint for files and folders
  * Supports both single and bulk deletion
+ * Creates a SINGLE activity log entry for bulk operations
  *
  * @route DELETE /api/v1/items
  * @body { fileIds?: string[], folderIds?: string[] }
@@ -43,6 +44,16 @@ export const bulkSoftDelete = async (req, res, next) => {
       folders: { deleted: [], notFound: [], alreadyDeleted: [], errors: [] },
     };
 
+    // Prepare user info for activity logging
+    const userInfo = {
+      name: req.user.username,
+      email: req.user.email,
+      avatar: req.user.avatar || null
+    };
+
+    // Collect all items being deleted (for bulk logging)
+    const itemsBeingDeleted = [];
+
     // Process file deletions
     for (const fileId of sanitizedFileIds) {
       try {
@@ -60,23 +71,21 @@ export const bulkSoftDelete = async (req, res, next) => {
 
         await document.softDelete();
 
-        // Log activity
-        await ActivityLogModel.logActivity({
-          action: "DOCUMENT_DELETED",
-          entityType: "Document",
-          entityId: document._id,
-          entityName: document.name,
-          performedBy: userId,
-          performedByName: req.user.name,
-          performedByEmail: req.user.email,
-          description: `Deleted document "${document.displayName}"`,
-          ipAddress: req.ip,
-          userAgent: req.get("user-agent"),
+        // Add to items being deleted (for bulk log)
+        itemsBeingDeleted.push({
+          _id: document._id,
+          id: document._id,
+          name: document.displayName || document.name,
+          extension: document.extension || '',
+          type: document.mimeType || document.type || '',
+          itemType: 'file',
+          size: document.size || 0,
+          parent_id: document.parent_id || document.parentId
         });
 
         results.files.deleted.push({
           id: fileId,
-          name: document.displayName,
+          name: document.displayName || document.name,
         });
       } catch (error) {
         results.files.errors.push({
@@ -101,31 +110,61 @@ export const bulkSoftDelete = async (req, res, next) => {
           continue;
         }
 
+        // Get count of items inside the folder before deletion
+        const itemsInside = await FolderModel.countDocuments({
+          parent_id: folderId,
+          isDeleted: false
+        });
+        const filesInside = await DocumentModel.countDocuments({
+          parent_id: folderId,
+          isDeleted: false
+        });
+        const totalItemsInside = itemsInside + filesInside;
+
         await folder.softDelete();
 
-        // Log activity
-        await ActivityLogModel.logActivity({
-          action: "FOLDER_DELETED",
-          entityType: "Folder",
-          entityId: folder._id,
-          entityName: folder.name,
-          performedBy: userId,
-          performedByName: req.user.name,
-          performedByEmail: req.user.email,
-          description: `Deleted folder "${folder.name}"`,
-          ipAddress: req.ip,
-          userAgent: req.get("user-agent"),
+        // Add to items being deleted (for bulk log)
+        itemsBeingDeleted.push({
+          _id: folder._id,
+          id: folder._id,
+          name: folder.name,
+          parent_id: folder.parent_id || folder.parentId,
+          itemType: 'folder',
+          nestedItemsCount: totalItemsInside
         });
 
         results.folders.deleted.push({
           id: folderId,
           name: folder.name,
+          itemsDeletedInside: totalItemsInside
         });
       } catch (error) {
         results.folders.errors.push({
           id: folderId,
           error: error.message,
         });
+      }
+    }
+
+    // ✅ FIXED: Create a SINGLE bulk activity log instead of multiple logs
+    if (itemsBeingDeleted.length > 0) {
+      try {
+        if (itemsBeingDeleted.length === 1) {
+          // Single item deletion - use specific log method
+          const item = itemsBeingDeleted[0];
+          if (item.itemType === 'file') {
+            await ActivityLogModel.logFileDelete(userId, item, userInfo);
+          } else {
+            await ActivityLogModel.logFolderDelete(userId, item, userInfo, item.nestedItemsCount || 0);
+          }
+        } else {
+          // Multiple items deletion - create ONE bulk log entry
+          // Similar to logBulkRestore but for deletion
+          await ActivityLogModel.logBulkDelete(userId, itemsBeingDeleted, userInfo);
+        }
+      } catch (activityError) {
+        console.error('Error logging bulk deletion:', activityError);
+        // Don't fail the deletion if activity logging fails
       }
     }
 
@@ -168,6 +207,3 @@ export const bulkSoftDelete = async (req, res, next) => {
     next(error);
   }
 };
-
-// Example route registration
-// router.delete('/items', authenticate, bulkSoftDelete);

@@ -1,9 +1,13 @@
-// controllers/trashController.js
-
+/** 
+ * TRASH CONTROLLER - Complete Activity Logging Implementation
+ * ✅ All restore activities logged
+ * ✅ All delete activities logged (NEW)
+ * ✅ All permanent delete activities logged (NEW)
+ */
 import createHttpError from 'http-errors';
 import FolderModel from '../models/folderModel.js';
 import DocumentModel from '../models/documentModel.js';
-import ActivityLogModel from '../models/activityModel.js';
+import ActivityLog from '../models/activityModel.js';
 import mongoose from 'mongoose';
 import { 
   sanitizeInputWithXSS, 
@@ -12,6 +16,15 @@ import {
   sanitizeAndValidateIds
 } from '../utils/helper.js';
 import { bulkRestoreSchema } from '../validation/commonValidation.js';
+
+/**
+ * Helper function to get user info for activity logging
+ */
+const getUserInfo = (user) => ({
+  name: user.name || user.username || 'Unknown User',
+  email: user.email || '',
+  avatar: user.avatar || user.profilePicture || user.profilePic || null
+});
 
 /**
  * Get all deleted items (folders + documents) with pagination
@@ -32,7 +45,6 @@ export const getTrashItems = async (req, res, next) => {
       deletedAt: { $gte: thirtyDaysAgo, $ne: null }
     };
 
-    // ✅ FIXED: Folders don't have deletedBy field - populate createdBy instead
     const [folders, totalFolders] = await Promise.all([
       FolderModel.find(baseQuery)
         .populate("createdBy", "name username email profilePic")
@@ -41,7 +53,6 @@ export const getTrashItems = async (req, res, next) => {
       FolderModel.countDocuments(baseQuery)
     ]);
 
-    // ✅ Documents have deletedBy field - populate it
     const [documents, totalDocuments] = await Promise.all([
       DocumentModel.find(baseQuery)
         .populate("deletedBy", "name username email profilePic")
@@ -55,7 +66,6 @@ export const getTrashItems = async (req, res, next) => {
     );
 
     const totalItems = totalFolders + totalDocuments;
-
     items = items.slice(skip, skip + limit);
 
     const data = items.map((item) => {
@@ -68,8 +78,6 @@ export const getTrashItems = async (req, res, next) => {
         (autoDeleteDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
       );
 
-      // For folders: use createdBy as the deletedBy info
-      // For documents: use actual deletedBy field
       const deletedByUser = item.deletedBy || item.createdBy;
 
       return {
@@ -110,11 +118,10 @@ export const getTrashItems = async (req, res, next) => {
   }
 };
 
-
 /**
- * Restore a single item (auto-detect folder or document)
+ * ✅ ACTIVITY LOGGED: Restore a single item
  * Route: POST /api/trash/restore/:id
- * Access: Private
+ * Activity: FILE_RESTORED or FOLDER_RESTORED
  */
 export const restoreItem = async (req, res, next) => {
   try {
@@ -122,11 +129,9 @@ export const restoreItem = async (req, res, next) => {
     const userId = req.user.id;
     const sanitizedId = sanitizeAndValidateId(id, 'Item ID');
 
-    // Try to find as folder first
     let item = await FolderModel.findById(sanitizedId);
     let itemType = 'folder';
 
-    // If not found, try document
     if (!item) {
       item = await DocumentModel.findById(sanitizedId);
       itemType = 'document';
@@ -140,7 +145,6 @@ export const restoreItem = async (req, res, next) => {
       throw createHttpError(400, 'Item is not deleted');
     }
 
-    // Check if parent exists and is not deleted
     const FolderModelRef = mongoose.model('Folder');
     const DepartmentModel = mongoose.model('Department');
 
@@ -157,10 +161,8 @@ export const restoreItem = async (req, res, next) => {
       throw createHttpError(400, 'Cannot restore. Parent is deleted. Please restore parent first.');
     }
 
-    // Restore the item
     await item.restore();
 
-    // If folder, restore all descendants
     if (itemType === 'folder') {
       const escapedPath = item.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       
@@ -175,26 +177,23 @@ export const restoreItem = async (req, res, next) => {
       );
     }
 
-    // Log restore activity
-    const targetType = itemType === 'folder' ? 'folder' : 'file';
-    const action = itemType === 'folder' ? 'FOLDER_RESTORED' : 'FILE_RESTORED';
-    
-    await ActivityLogModel.logActivity({
-      userId: userId,
-      action: action,
-      targetType: targetType,
-      targetId: item._id,
-      metadata: {
-        ...(itemType === 'folder' 
-          ? { folderName: item.name }
-          : { 
-              fileName: item.name,
-              fileExtension: ActivityLogModel.getFileExtension(item.name),
-              fileType: item.mimeType || item.type
-            }
-        )
-      }
-    });
+    // ✅ ACTIVITY LOG: FILE_RESTORED or FOLDER_RESTORED
+    const userInfo = getUserInfo(req.user);
+    const restoredItem = {
+      id: item._id,
+      name: item.name,
+      type: itemType,
+      itemType: itemType,
+      path: item.path,
+      parent_id: item.parent_id
+    };
+
+    if (itemType === 'document') {
+      restoredItem.extension = item.extension || '';
+      restoredItem.size = item.size || 0;
+    }
+
+    await ActivityLog.logBulkRestore(userId, [restoredItem], userInfo);
 
     res.status(200).json({
       success: true,
@@ -211,14 +210,15 @@ export const restoreItem = async (req, res, next) => {
 };
 
 /**
- * Permanently delete a single item (auto-detect folder or document)
+ * ✅ ACTIVITY LOGGED: Permanently delete a single item
  * Route: DELETE /api/trash/:id
- * Access: Private
+ * Activity: Logged via logBulkPermanentDelete
  */
 export const permanentlyDeleteItem = async (req, res, next) => {
   try {
     const { id } = req.params;
     const confirmation = req.query.confirmation === 'true';
+    const userId = req.user.id;
 
     if (!confirmation) {
       throw createHttpError(400, 'Confirmation required to permanently delete item');
@@ -226,11 +226,9 @@ export const permanentlyDeleteItem = async (req, res, next) => {
 
     const sanitizedId = sanitizeAndValidateId(id, 'Item ID');
 
-    // Try to find as folder first
     let item = await FolderModel.findById(sanitizedId);
     let itemType = 'folder';
 
-    // If not found, try document
     if (!item) {
       item = await DocumentModel.findById(sanitizedId);
       itemType = 'document';
@@ -240,7 +238,22 @@ export const permanentlyDeleteItem = async (req, res, next) => {
       throw createHttpError(404, 'Item not found');
     }
 
-    // If it's a folder, delete all descendants
+    // 🆕 Prepare item data for activity log BEFORE deletion
+    const itemData = {
+      id: item._id,
+      name: item.name,
+      type: itemType,
+      itemType: itemType,
+      path: item.path,
+      parent_id: item.parent_id
+    };
+
+    if (itemType === 'document') {
+      itemData.extension = item.extension || '';
+      itemData.size = item.size || 0;
+    }
+
+    // Delete descendants if folder
     if (itemType === 'folder') {
       const escapedPath = item.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       
@@ -253,12 +266,16 @@ export const permanentlyDeleteItem = async (req, res, next) => {
       });
     }
 
-    // Delete the item itself
+    // Delete the item
     if (itemType === 'folder') {
       await FolderModel.findByIdAndDelete(sanitizedId);
     } else {
       await DocumentModel.findByIdAndDelete(sanitizedId);
     }
+
+    // ✅ ACTIVITY LOG: Log permanent deletion (uses single item via logBulkPermanentDelete)
+    const userInfo = getUserInfo(req.user);
+    await ActivityLog.logBulkPermanentDelete(userId, [itemData], userInfo);
 
     res.status(200).json({
       success: true,
@@ -270,9 +287,9 @@ export const permanentlyDeleteItem = async (req, res, next) => {
 };
 
 /**
- * Bulk restore multiple items
+ * ✅ ACTIVITY LOGGED: Bulk restore multiple items
  * Route: POST /api/trash/restore/bulk
- * Access: Private
+ * Activity: ITEMS_RESTORED
  */
 export const bulkRestoreItems = async (req, res, next) => {
   try {
@@ -280,26 +297,20 @@ export const bulkRestoreItems = async (req, res, next) => {
     
     const userId = req.user.id;
     
-    // Validate request
     const parsed = bulkRestoreSchema.safeParse(req);
     if (!parsed.success) {
       throw createHttpError(400, 'Invalid request payload');
     }
 
     const { itemIds } = parsed.data.body;
-
-    // Sanitize all IDs
     const sanitizedIds = sanitizeAndValidateIds(itemIds, 'Item ID');
 
     const restored = [];
     const failed = [];
-
-    // Generate bulk group ID for activity logging
-    const bulkGroupId = `grp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const restoredItems = [];
 
     for (const itemId of sanitizedIds) {
       try {
-        // Try folder first
         let item = await FolderModel.findById(itemId);
         let itemType = 'folder';
 
@@ -318,7 +329,6 @@ export const bulkRestoreItems = async (req, res, next) => {
           continue;
         }
 
-        // Check parent
         const FolderModelRef = mongoose.model('Folder');
         const DepartmentModel = mongoose.model('Department');
 
@@ -330,10 +340,8 @@ export const bulkRestoreItems = async (req, res, next) => {
           continue;
         }
 
-        // Restore item
         await item.restore();
 
-        // If folder, restore descendants
         if (itemType === 'folder') {
           const escapedPath = item.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           await FolderModelRef.updateMany(
@@ -348,31 +356,31 @@ export const bulkRestoreItems = async (req, res, next) => {
 
         restored.push({ id: itemId, type: itemType, name: item.name });
 
-        // Log individual restore activity with bulk group ID
-        const targetType = itemType === 'folder' ? 'folder' : 'file';
-        
-        await ActivityLogModel.logActivity({
-          userId: userId,
-          action: 'BULK_RESTORE',
-          targetType: targetType,
-          targetId: item._id,
-          metadata: {
-            bulkGroupId: bulkGroupId,
-            itemCount: sanitizedIds.length,
-            ...(itemType === 'folder' 
-              ? { folderName: item.name }
-              : { 
-                  fileName: item.name,
-                  fileExtension: ActivityLogModel.getFileExtension(item.name),
-                  fileType: item.mimeType || item.type
-                }
-            )
-          }
-        });
+        const restoredItem = {
+          id: item._id,
+          name: item.name,
+          type: itemType,
+          itemType: itemType,
+          path: item.path,
+          parent_id: item.parent_id
+        };
+
+        if (itemType === 'document') {
+          restoredItem.extension = item.extension || '';
+          restoredItem.size = item.size || 0;
+        }
+
+        restoredItems.push(restoredItem);
 
       } catch (err) {
         failed.push({ id: itemId, reason: err.message });
       }
+    }
+
+    // ✅ ACTIVITY LOG: ITEMS_RESTORED
+    if (restoredItems.length > 0) {
+      const userInfo = getUserInfo(req.user);
+      await ActivityLog.logBulkRestore(userId, restoredItems, userInfo);
     }
 
     res.status(200).json({
@@ -382,8 +390,7 @@ export const bulkRestoreItems = async (req, res, next) => {
         failed, 
         total: itemIds.length, 
         restoredCount: restored.length, 
-        failedCount: failed.length,
-        bulkGroupId: bulkGroupId
+        failedCount: failed.length
       },
       message: `Restored ${restored.length} of ${itemIds.length} items`,
     });
@@ -392,15 +399,15 @@ export const bulkRestoreItems = async (req, res, next) => {
   }
 };
 
-
 /**
- * Bulk permanently delete multiple items
+ * ✅ ACTIVITY LOGGED: Bulk permanently delete multiple items
  * Route: POST /api/trash/delete/bulk
- * Access: Private
+ * Activity: ITEMS_PERMANENTLY_DELETED
  */
 export const bulkPermanentlyDeleteItems = async (req, res, next) => {
   try {
     const { itemIds, confirmation } = req.body;
+    const userId = req.user.id;
 
     if (!confirmation) {
       throw createHttpError(400, 'Confirmation required to permanently delete items');
@@ -412,16 +419,15 @@ export const bulkPermanentlyDeleteItems = async (req, res, next) => {
 
     const deleted = [];
     const failed = [];
+    const deletedItems = []; // For activity logging
 
     for (const itemId of itemIds) {
       try {
         const sanitizedId = sanitizeAndValidateId(itemId, 'Item ID');
 
-        // Try folder first
         let item = await FolderModel.findById(sanitizedId);
         let itemType = 'folder';
 
-        // If not folder, try document
         if (!item) {
           item = await DocumentModel.findById(sanitizedId);
           itemType = 'document';
@@ -432,7 +438,22 @@ export const bulkPermanentlyDeleteItems = async (req, res, next) => {
           continue;
         }
 
-        // If it's a folder, delete all descendants
+        // 🆕 Prepare item data for activity log BEFORE deletion
+        const itemData = {
+          id: item._id,
+          name: item.name,
+          type: itemType,
+          itemType: itemType,
+          path: item.path,
+          parent_id: item.parent_id
+        };
+
+        if (itemType === 'document') {
+          itemData.extension = item.extension || '';
+          itemData.size = item.size || 0;
+        }
+
+        // Delete descendants if folder
         if (itemType === 'folder') {
           const escapedPath = item.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           
@@ -450,9 +471,17 @@ export const bulkPermanentlyDeleteItems = async (req, res, next) => {
         }
 
         deleted.push({ id: itemId, type: itemType, name: item.name });
+        deletedItems.push(itemData);
+
       } catch (error) {
         failed.push({ id: itemId, reason: error.message });
       }
+    }
+
+    // ✅ ACTIVITY LOG: ITEMS_PERMANENTLY_DELETED
+    if (deletedItems.length > 0) {
+      const userInfo = getUserInfo(req.user);
+      await ActivityLog.logBulkPermanentDelete(userId, deletedItems, userInfo);
     }
 
     res.status(200).json({
