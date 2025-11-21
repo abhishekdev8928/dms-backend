@@ -452,8 +452,6 @@ export const forgotPassword = async (req, res, next) => {
     user.passwordResetExpires = now + 15 * 60 * 1000; // 15 minutes
     await user.save();
 
-    
-
     const resetUrl = `${config.frontendUrl}/auth/reset-password?token=${resetToken}`;
 
     console.log(resetUrl);
@@ -471,7 +469,7 @@ export const forgotPassword = async (req, res, next) => {
 };
 
 /**
- * @desc    Reset password using token and send OTP
+ * @desc    Reset password with auto-login (no OTP required)
  * @route   POST /auth/reset-password
  * @body    { token, newPassword }
  * @access  Public
@@ -499,31 +497,58 @@ export const resetPassword = async (req, res, next) => {
       throw createHttpError(400, "Invalid or expired reset token");
     }
 
-    // Update password
+    // Update password (will be hashed by pre-save hook)
     user.password = newPassword;
 
     // Clear reset token fields
     user.passwordResetToken = undefined;
     user.passwordResetExpires = undefined;
 
-    // Mark as unverified and generate OTP
-    user.isVerified = false;
-    const otp = generateOTP();
-    user.otp = otp;
-    user.otpExpires = new Date(Date.now() + 10 * 60 * 1000);
+    // Clear OTP fields (no OTP needed for reset flow)
+    user.otp = undefined;
+    user.otpExpires = undefined;
 
-    // Clear all refresh tokens (force re-login)
+    // Mark as verified (auto-verify after password reset)
+    user.isVerified = true;
+
+    // Update last login
+    user.lastLogin = new Date();
+
+    // Clear all old refresh tokens (force logout from all devices)
     user.refreshTokens = [];
+
+    // Generate new authentication tokens
+    const { accessToken, refreshToken } = generateTokens(
+      user._id,
+      user.email,
+      user.role
+    );
+
+    // Store hashed refresh token
+    const hashedRefreshToken = crypto
+      .createHash("sha256")
+      .update(refreshToken)
+      .digest("hex");
+
+    user.refreshTokens.push({
+      token: hashedRefreshToken,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+    });
 
     await user.save();
 
-    // Send OTP email
-    await sendOTPEmail(user.email, user.username, otp, 10);
-
     return res.status(200).json({
       success: true,
-      message: "Password reset successfully. OTP has been sent to your email for verification.",
-      data: { userId: user._id },
+      message: "Password reset successfully. You are now logged in.",
+      data: {
+        userId: user._id,
+        email: user.email,
+        username: user.username,
+        role: user.role,
+        accessToken,
+        refreshToken, // Send plain token to client
+        redirectTo: "/dashboard", // Frontend can use this to redirect
+      },
     });
   } catch (error) {
     next(error);
