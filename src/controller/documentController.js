@@ -834,6 +834,11 @@ export const generateDownloadUrl = async (req, res, next) => {
  * NOTE: FILE_VERSION_UPLOADED is not in your activity model enum
  * If you want to track version uploads, add FILE_VERSION_UPLOADED to the enum and create a static method
  */
+
+/**
+ * Create new version (reupload)
+ * Now with activity logging
+ */
 export const createVersion = async (req, res, next) => {
   try {
     const parsed = createVersionSchema.safeParse({
@@ -873,8 +878,30 @@ export const createVersion = async (req, res, next) => {
       userId
     );
 
-    // ⚠️ FILE_VERSION_UPLOADED is already in your enum but no static method exists
-    // If you want to track this, create ActivityLog.logFileVersionUpload() in your model
+    // ✅ Log the version upload activity (REUPLOAD = UPLOAD)
+    try {
+      await ActivityLog.logFileVersionUpload(
+        userId,
+        {
+          _id: document._id,
+          id: document._id,
+          name: document.name,
+          extension: document.extension,
+          type: document.type,
+          size: fileMetadata.size,
+          parent_id: document.parent_id
+        },
+        newVersion.versionNumber, // Pass the new version number
+        {
+          name: req.user.name || req.user.username,
+          email: req.user.email,
+          avatar: req.user.avatar
+        }
+      );
+    } catch (logError) {
+      console.error('Failed to log version upload activity:', logError);
+      // Don't fail the request if logging fails
+    }
 
     res.status(201).json({
       success: true,
@@ -885,6 +912,8 @@ export const createVersion = async (req, res, next) => {
     next(error);
   }
 };
+
+
 
 /**
  * Get all versions
@@ -954,14 +983,37 @@ export const revertToVersion = async (req, res, next) => {
     // Use MODEL method (revertToVersion)
     const newVersion = await document.revertToVersion(versionNumber, userId);
 
-    // ⚠️ You could log FILE_VERSION_UPLOADED here if you add the static method
+    // ✅ Log the revert as a RESTORE activity (not upload!)
+    try {
+      await ActivityLog.logFileVersionRestore(
+        userId,
+        {
+          _id: document._id,
+          id: document._id,
+          name: document.name,
+          extension: document.extension,
+          type: document.type,
+          size: newVersion.size,
+          parent_id: document.parent_id
+        },
+        versionNumber,              // The version that was restored
+        newVersion.versionNumber,   // The new version number created by the restore
+        {
+          name: req.user.name || req.user.username,
+          email: req.user.email,
+          avatar: req.user.avatar
+        }
+      );
+    } catch (logError) {
+      console.error('Failed to log version restore activity:', logError);
+      // Don't fail the request if logging fails
+    }
 
     res.status(200).json({
       success: true,
       message: `Version ${versionNumber} restored successfully`,
       data: newVersion
     });
-
   } catch (error) {
     next(error);
   }

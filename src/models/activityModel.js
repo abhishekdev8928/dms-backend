@@ -36,6 +36,7 @@ const TargetSchema = new mongoose.Schema({
   
   // For versions
   version: Number,
+  newVersion: Number,  // ✅ NEW - for restore operations (stores the new version number created)
   
   // For folder operations
   folderName: String,
@@ -88,7 +89,6 @@ const activityLogSchema = new mongoose.Schema({
     index: true
   },
   
-  // 📸 Complete snapshot of user at time of action
   userSnapshot: {
     id: String,
     name: String,
@@ -96,29 +96,30 @@ const activityLogSchema = new mongoose.Schema({
     avatar: String
   },
   
-  action: {
-    type: String,
-    required: [true, 'Action is required'],
-    enum: [
-      'FILES_UPLOADED',
-      'FILE_UPLOADED',
-      'FILE_VERSION_UPLOADED',
-      'FILE_RENAMED',
-      'FILE_MOVED',
-      'ITEMS_DELETED',
-      'FILE_DELETED',
-      'FILE_RESTORED',
-      'FILE_DOWNLOADED',
-      'FILE_PREVIEWED',
-      'FOLDER_CREATED',
-      'FOLDER_RENAMED',
-      'FOLDER_MOVED',
-      'FOLDER_DELETED',
-      'FOLDER_RESTORED',
-      'ITEMS_RESTORED'
-    ],
-    index: true
-  },
+ action: {
+  type: String,
+  required: [true, 'Action is required'],
+  enum: [
+    'FILES_UPLOADED',
+    'FILE_UPLOADED',
+    'FILE_VERSION_UPLOADED',      // ✅ For reupload
+    'FILE_VERSION_RESTORED',      // ✅ NEW - For revert to version
+    'FILE_RENAMED',
+    'FILE_MOVED',
+    'ITEMS_DELETED',
+    'FILE_DELETED',
+    'FILE_RESTORED',
+    'FILE_DOWNLOADED',
+    'FILE_PREVIEWED',
+    'FOLDER_CREATED',
+    'FOLDER_RENAMED',
+    'FOLDER_MOVED',
+    'FOLDER_DELETED',
+    'FOLDER_RESTORED',
+    'ITEMS_RESTORED'
+  ],
+  index: true
+},
   
   targetType: {
     type: String,
@@ -127,19 +128,11 @@ const activityLogSchema = new mongoose.Schema({
     index: true
   },
   
-  // ✅ FIX: Use the TargetSchema defined above
   target: TargetSchema,
-  
-  // 📸 Immediate parent folder snapshot
   parentFolder: ParentFolderSnapshotSchema,
-  
-  // 🆕 Full ancestor chain (from root to immediate parent)
   ancestors: [AncestorSchema],
-  
-  // 🆕 Full path at time of action (for display and search)
   fullPath: String,
   
-  // For bulk operations (multiple files/folders)
   bulkOperation: {
     itemCount: {
       type: Number,
@@ -479,8 +472,86 @@ activityLogSchema.statics.logFileRename = async function(userId, file, oldName, 
     throw error;
   }
 };
+activityLogSchema.statics.logFileVersionUpload = async function(userId, file, versionNumber, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
 
+    const parentFolder = await getParentFolderSnapshot(file.parent_id);
+    const ancestors = await getAncestorChain(file.parent_id);
+    const fullPath = buildFullPath(ancestors, file.name);
+
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot: {
+        id: userId.toString(),
+        name: userInfo.name,
+        email: userInfo.email,
+        avatar: userInfo.avatar || null
+      },
+      action: 'FILE_VERSION_UPLOADED',
+      targetType: 'file',
+      target: {
+        id: file.id?.toString() || file._id?.toString(),
+        name: file.name,
+        extension: file.extension || '',
+        type: file.type || '',
+        size: Number(file.size) || 0,
+        version: versionNumber,
+        path: fullPath
+      },
+      parentFolder,
+      ancestors,
+      fullPath
+    });
+  } catch (error) {
+    console.error('Error logging file version upload:', error);
+    throw error;
+  }
+};
+
+activityLogSchema.statics.logFileVersionRestore = async function(userId, file, restoredVersionNumber, newVersionNumber, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const parentFolder = await getParentFolderSnapshot(file.parent_id);
+    const ancestors = await getAncestorChain(file.parent_id);
+    const fullPath = buildFullPath(ancestors, file.name);
+
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot: {
+        id: userId.toString(),
+        name: userInfo.name,
+        email: userInfo.email,
+        avatar: userInfo.avatar || null
+      },
+      action: 'FILE_VERSION_RESTORED',
+      targetType: 'file',
+      target: {
+        id: file.id?.toString() || file._id?.toString(),
+        name: file.name,
+        extension: file.extension || '',
+        type: file.type || '',
+        size: Number(file.size) || 0,
+        version: restoredVersionNumber, // The version that was restored
+        newVersion: newVersionNumber,    // The new version number created
+        path: fullPath
+      },
+      parentFolder,
+      ancestors,
+      fullPath
+    });
+  } catch (error) {
+    console.error('Error logging file version restore:', error);
+    throw error;
+  }
+};
 /**
+ * 
  * Log file move
  */
 activityLogSchema.statics.logFileMove = async function(userId, file, fromParentId, toParentId, userInfo) {
@@ -997,41 +1068,36 @@ activityLogSchema.statics.logBulkDelete = async function(userId, items, userInfo
  * Generate human-readable message
  */
 activityLogSchema.methods.getMessage = function() {
-  const { action, target, bulkOperation, userSnapshot, ancestors } = this;
+  const { action, target, bulkOperation, userSnapshot } = this;
   const userName = userSnapshot?.name || 'You';
-  
-  // Build location string from ancestors
-  const location = ancestors && ancestors.length > 0 
-    ? ancestors.map(a => a.name).join(' → ')
-    : 'root';
   
   switch (action) {
     case 'FILES_UPLOADED':
-      return `${userName} uploaded ${bulkOperation.itemCount} items to ${location}`;
+      return `${userName} uploaded ${bulkOperation.itemCount} items`;
     
     case 'FILE_UPLOADED':
-      return `${userName} uploaded ${target.name} in ${location}`;
+      return `${userName} uploaded ${target.name}`;
     
     case 'FILE_VERSION_UPLOADED':
       return `${userName} uploaded version ${target.version} of ${target.name}`;
+    
+    case 'FILE_VERSION_RESTORED':  // ✅ NEW CASE
+      return `${userName} restored version ${target.version} of ${target.name}`;
     
     case 'FILE_RENAMED':
       return `${userName} renamed ${target.oldName} to ${target.newName}`;
     
     case 'FILE_MOVED':
-      const fromLocation = target.oldAncestors && target.oldAncestors.length > 0
-        ? target.oldAncestors.map(a => a.name).join(' → ')
-        : 'root';
-      const toLocation = target.newAncestors && target.newAncestors.length > 0
-        ? target.newAncestors.map(a => a.name).join(' → ')
-        : 'root';
-      return `${userName} moved ${target.name} from ${fromLocation} to ${toLocation}`;
+      return `${userName} moved ${target.name}`;
+    
+    case 'ITEMS_DELETED':
+      return `${userName} moved ${bulkOperation.itemCount} items to the bin`;
     
     case 'FILE_DELETED':
       return `${userName} moved ${target.name} to the bin`;
     
     case 'FILE_RESTORED':
-      return `${userName} restored ${target.name} to ${location}`;
+      return `${userName} restored ${target.name}`;
     
     case 'FILE_DOWNLOADED':
       return `${userName} downloaded ${target.name}`;
@@ -1040,25 +1106,19 @@ activityLogSchema.methods.getMessage = function() {
       return `${userName} previewed ${target.name}`;
     
     case 'FOLDER_CREATED':
-      return `${userName} created folder ${target.folderName} in ${location}`;
+      return `${userName} created folder ${target.folderName}`;
     
     case 'FOLDER_RENAMED':
       return `${userName} renamed folder ${target.oldName} to ${target.newName}`;
     
     case 'FOLDER_MOVED':
-      const folderFromLocation = target.oldAncestors && target.oldAncestors.length > 0
-        ? target.oldAncestors.map(a => a.name).join(' → ')
-        : 'root';
-      const folderToLocation = target.newAncestors && target.newAncestors.length > 0
-        ? target.newAncestors.map(a => a.name).join(' → ')
-        : 'root';
-      return `${userName} moved folder ${target.folderName} from ${folderFromLocation} to ${folderToLocation}`;
+      return `${userName} moved folder ${target.folderName}`;
     
     case 'FOLDER_DELETED':
       return `${userName} moved folder ${target.folderName} to the bin`;
     
     case 'FOLDER_RESTORED':
-      return `${userName} restored folder ${target.folderName} to ${location}`;
+      return `${userName} restored folder ${target.folderName}`;
     
     case 'ITEMS_RESTORED':
       return `${userName} restored ${bulkOperation.itemCount} items`;

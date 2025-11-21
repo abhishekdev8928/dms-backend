@@ -202,20 +202,97 @@ export const getFileActivity = async (req, res) => {
       });
     }
 
+    // Get all activities related to this file
     const activities = await ActivityLog.getEntityHistory(fileId, limit);
 
-    const formattedActivities = activities.map(activity => ({
-      ...activity,
-      user: activity.userSnapshot || { name: 'Unknown User' },
-      message: new ActivityLog(activity).getMessage(),
-      timeLabel: new ActivityLog(activity).getTimeLabel(),
-      formattedTime: new ActivityLog(activity).getFormattedTime()
-    }));
+    // Filter and transform activities for this specific file
+    const fileSpecificActivities = activities
+      .map(activity => {
+        // If it's a bulk operation, check if this file is part of it
+        if (activity.targetType === 'multiple' && activity.bulkOperation?.items) {
+          const fileInBulk = activity.bulkOperation.items.find(
+            item => item.id === fileId
+          );
+
+          // If this file is part of the bulk operation, transform it to show only this file
+          if (fileInBulk) {
+            return {
+              ...activity,
+              // Override to make it look like a single file operation
+              targetType: 'file',
+              target: {
+                id: fileInBulk.id,
+                name: fileInBulk.name,
+                extension: fileInBulk.extension,
+                type: fileInBulk.type,
+                size: fileInBulk.size
+              },
+              // Remove bulk operation data for cleaner display
+              bulkOperation: {
+                itemCount: 1,
+                items: [fileInBulk]
+              },
+              // Update message to reflect single file
+              originalAction: activity.action
+            };
+          }
+          
+          // File not in this bulk operation, exclude it
+          return null;
+        }
+
+        // If it's a single file operation targeting this file, show it as-is
+        if (activity.targetType === 'file' && 
+            (activity.target?.id === fileId || activity.targetId === fileId)) {
+          return activity;
+        }
+
+        // Exclude other activities
+        return null;
+      })
+      .filter(activity => activity !== null); // Remove excluded activities
+
+    const formattedActivities = fileSpecificActivities.map(activity => {
+      const activityLog = new ActivityLog(activity);
+      
+      // Generate custom message for transformed bulk operations
+      let message = activityLog.getMessage();
+      if (activity.originalAction) {
+        const userName = activity.userSnapshot?.name || 'Someone';
+        const fileName = activity.target?.name || 'this file';
+        
+        switch (activity.originalAction) {
+          case 'FILES_UPLOADED':
+            message = `${userName} uploaded ${fileName}`;
+            break;
+          case 'ITEMS_RESTORED':
+            message = `${userName} restored ${fileName}`;
+            break;
+          case 'ITEMS_DELETED':
+            message = `${userName} moved ${fileName} to the bin`;
+            break;
+          case 'ITEMS_MOVED':
+            message = `${userName} moved ${fileName}`;
+            break;
+          default:
+            message = activityLog.getMessage();
+        }
+      }
+
+      return {
+        ...activity,
+        user: activity.userSnapshot || { name: 'Unknown User' },
+        message: message,
+        timeLabel: activityLog.getTimeLabel(),
+        formattedTime: activityLog.getFormattedTime()
+      };
+    });
 
     res.status(200).json({
       success: true,
       data: formattedActivities,
-      count: formattedActivities.length
+      count: formattedActivities.length,
+      fileId: fileId
     });
 
   } catch (error) {
