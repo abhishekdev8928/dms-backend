@@ -271,6 +271,18 @@ export const getChildFolders = async (req, res, next) => {
       });
     }
 
+    // Sort: folders first, then documents/files
+    filteredChildren.sort((a, b) => {
+      const aIsFolder = a.constructor.modelName === 'Folder' || a.type === 'folder';
+      const bIsFolder = b.constructor.modelName === 'Folder' || b.type === 'folder';
+      
+      if (aIsFolder && !bIsFolder) return -1;
+      if (!aIsFolder && bIsFolder) return 1;
+      
+      // If both are same type, maintain createdAt order (newest first)
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
+
     res.status(200).json({
       success: true,
       count: filteredChildren.length,
