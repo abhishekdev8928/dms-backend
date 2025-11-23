@@ -17,18 +17,17 @@ const departmentSchema = new mongoose.Schema({
   // Parent-child hierarchy fields
   parent_id: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Item',  // References the unified Item model
-    default: null  // null means this is a root department
+    default: null  // Just a mongoose ID - can reference anything
   },
- type: {
-  type: String,
-  default: "department",
-  enum: ["department"], 
-  immutable: true 
-},
+  type: {
+    type: String,
+    default: "department",
+    enum: ["department"], 
+    immutable: true 
+  },
   path: {
     type: String,
-    index: true  // For fast breadcrumb and lookup queries
+    index: true
   },
   
   // Auto-calculated statistics
@@ -74,8 +73,8 @@ const departmentSchema = new mongoose.Schema({
 departmentSchema.index({ name: 1 });
 departmentSchema.index({ isActive: 1 });
 departmentSchema.index({ createdAt: -1 });
-departmentSchema.index({ parent_id: 1 });  // For parent-child queries
-departmentSchema.index({ path: 1 });  // For path-based lookups
+departmentSchema.index({ parent_id: 1 });
+departmentSchema.index({ path: 1 });
 
 // Virtual for formatted storage size
 departmentSchema.virtual('stats.totalStorageFormatted').get(function() {
@@ -91,28 +90,29 @@ departmentSchema.virtual('stats.totalStorageFormatted').get(function() {
 
 // Methods
 departmentSchema.methods.updateStats = async function() {
-  const Item = mongoose.model('Item');
+  const FolderModel = mongoose.model('Folder');
+  const DocumentModel = mongoose.model('Document');
   
-  // Count folders (items with type 'folder' under this department's path)
-  const totalFolders = await Item.countDocuments({
-    path: new RegExp(`^${this.path}/`),
-    type: 'folder',
+  // Escape path for regex
+  const escapedPath = this.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  
+  // Count folders under this department
+  const totalFolders = await FolderModel.countDocuments({
+    path: new RegExp(`^${escapedPath}/`),
     isDeleted: false
   });
   
-  // Count documents (items with type 'file' under this department's path)
-  const totalDocuments = await Item.countDocuments({
-    path: new RegExp(`^${this.path}/`),
-    type: 'file',
+  // Count documents under this department
+  const totalDocuments = await DocumentModel.countDocuments({
+    path: new RegExp(`^${escapedPath}/`),
     isDeleted: false
   });
   
-  // Calculate total storage
-  const storageResult = await Item.aggregate([
+  // Calculate total storage from documents
+  const storageResult = await DocumentModel.aggregate([
     {
       $match: {
-        path: new RegExp(`^${this.path}/`),
-        type: 'file',
+        path: new RegExp(`^${escapedPath}/`),
         isDeleted: false
       }
     },
@@ -126,7 +126,6 @@ departmentSchema.methods.updateStats = async function() {
   
   const totalStorageBytes = storageResult.length > 0 ? storageResult[0].totalSize : 0;
   
-  // Update stats
   this.stats = {
     totalFolders,
     totalDocuments,
@@ -139,9 +138,61 @@ departmentSchema.methods.updateStats = async function() {
 
 // Method to build path automatically
 departmentSchema.methods.buildPath = function() {
-  // Department is always root level, so path is just "/DepartmentName"
   this.path = `/${this.name}`;
   return this.path;
+};
+
+// Update all child paths when department is renamed
+departmentSchema.methods.updateChildPaths = async function(oldPath) {
+  const FolderModel = mongoose.model('Folder');
+  const DocumentModel = mongoose.model('Document');
+  const newPath = this.path;
+  
+  // Escape special regex characters
+  const escapedOldPath = oldPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  
+  // Find all folders and documents that start with the old path
+  const [folders, documents] = await Promise.all([
+    FolderModel.find({
+      path: new RegExp(`^${escapedOldPath}`)
+    }),
+    DocumentModel.find({
+      path: new RegExp(`^${escapedOldPath}`)
+    })
+  ]);
+  
+  // Update folder paths
+  const folderOps = folders.map(folder => {
+    const newFolderPath = folder.path.replace(oldPath, newPath);
+    return {
+      updateOne: {
+        filter: { _id: folder._id },
+        update: { $set: { path: newFolderPath } }
+      }
+    };
+  });
+  
+  // Update document paths
+  const documentOps = documents.map(doc => {
+    const newDocPath = doc.path.replace(oldPath, newPath);
+    return {
+      updateOne: {
+        filter: { _id: doc._id },
+        update: { $set: { path: newDocPath } }
+      }
+    };
+  });
+  
+  // Execute bulk updates
+  if (folderOps.length > 0) {
+    await FolderModel.bulkWrite(folderOps);
+  }
+  
+  if (documentOps.length > 0) {
+    await DocumentModel.bulkWrite(documentOps);
+  }
+  
+  return folderOps.length + documentOps.length;
 };
 
 // Static methods
@@ -154,10 +205,17 @@ departmentSchema.statics.getByName = function(name) {
 };
 
 // Pre-save middleware
-departmentSchema.pre('save', function(next) {
+departmentSchema.pre('save', async function(next) {
   if (this.isModified('name')) {
+    // Store old path before building new one
+    if (!this.isNew) {
+      const oldDoc = await this.constructor.findById(this._id);
+      if (oldDoc && oldDoc.path) {
+        this._oldPath = oldDoc.path;
+      }
+    }
+    
     this.name = this.name.trim();
-    // Auto-generate path when name changes
     this.buildPath();
   }
   
@@ -165,6 +223,14 @@ departmentSchema.pre('save', function(next) {
   this.parent_id = null;
   
   next();
+});
+
+// Post-save middleware to update child paths
+departmentSchema.post('save', async function(doc) {
+  if (doc._oldPath && doc._oldPath !== doc.path) {
+    await doc.updateChildPaths(doc._oldPath);
+    delete doc._oldPath;
+  }
 });
 
 const DepartmentModel = mongoose.model('Department', departmentSchema);

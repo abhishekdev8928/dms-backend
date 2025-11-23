@@ -186,7 +186,7 @@ export const getFolderById = async (req, res, next) => {
 };
 
 /**
- * Get child folders/files with advanced filtering
+ * Get child folders/files with breadcrumbs
  */
 export const getChildFolders = async (req, res, next) => {
   try {
@@ -217,6 +217,9 @@ export const getChildFolders = async (req, res, next) => {
         throw createHttpError(404, "Parent folder or department not found");
       }
     }
+
+    // 🔥 BUILD BREADCRUMBS
+    const breadcrumbs = await buildBreadcrumbs(parent, parentType);
 
     let children;
     let mode = "direct";
@@ -279,7 +282,6 @@ export const getChildFolders = async (req, res, next) => {
       if (aIsFolder && !bIsFolder) return -1;
       if (!aIsFolder && bIsFolder) return 1;
       
-      // If both are same type, maintain createdAt order (newest first)
       return new Date(b.createdAt) - new Date(a.createdAt);
     });
 
@@ -288,6 +290,7 @@ export const getChildFolders = async (req, res, next) => {
       count: filteredChildren.length,
       mode: mode,
       parentType: parentType,
+      breadcrumbs: breadcrumbs, // 🔥 ADDED BREADCRUMBS
       filters: {
         type: type || null,
         userEmail: userEmail || null,
@@ -298,6 +301,133 @@ export const getChildFolders = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * 🔥 BREADCRUMB BUILDER FUNCTION
+ * Builds breadcrumbs starting from department
+ */
+async function buildBreadcrumbs(parent, parentType) {
+  const breadcrumbs = [];
+
+  if (parentType === "department") {
+    // If parent is department, just add it
+    breadcrumbs.push({
+      id: parent._id.toString(),
+      name: parent.name,
+      type: "department"
+    });
+  } else if (parentType === "folder") {
+    // For folders, parse the path to build the full breadcrumb trail
+    // Path format: /DepartmentName/Folder1/Folder2/CurrentFolder
+    const pathParts = parent.path.split('/').filter(part => part.length > 0);
+    
+    if (pathParts.length === 0) {
+      return breadcrumbs;
+    }
+
+    // First part is always the department
+    const departmentName = pathParts[0];
+    const department = await DepartmentModel.findOne({ name: departmentName });
+    
+    if (department) {
+      breadcrumbs.push({
+        id: department._id.toString(),
+        name: department.name,
+        type: "department"
+      });
+    }
+
+    // Now reconstruct each folder in the path
+    let currentPath = `/${departmentName}`;
+    
+    for (let i = 1; i < pathParts.length; i++) {
+      currentPath += `/${pathParts[i]}`;
+      
+      // Find folder by exact path match
+      const folder = await FolderModel.findOne({ 
+        path: currentPath,
+        isDeleted: false 
+      });
+      
+      if (folder) {
+        breadcrumbs.push({
+          id: folder._id.toString(),
+          name: folder.name,
+          type: "folder"
+        });
+      }
+    }
+  }
+
+  return breadcrumbs;
+}
+
+/**
+ * ALTERNATIVE: Optimized version using single query
+ * More efficient for deep hierarchies
+ */
+async function buildBreadcrumbsOptimized(parent, parentType) {
+  const breadcrumbs = [];
+
+  if (parentType === "department") {
+    breadcrumbs.push({
+      id: parent._id.toString(),
+      name: parent.name,
+      type: "department"
+    });
+  } else if (parentType === "folder") {
+    const pathParts = parent.path.split('/').filter(part => part.length > 0);
+    
+    if (pathParts.length === 0) return breadcrumbs;
+
+    // Get department
+    const departmentName = pathParts[0];
+    const department = await DepartmentModel.findOne({ name: departmentName });
+    
+    if (department) {
+      breadcrumbs.push({
+        id: department._id.toString(),
+        name: department.name,
+        type: "department"
+      });
+    }
+
+    // Build all possible paths and fetch folders in one query
+    const folderPaths = [];
+    let currentPath = `/${departmentName}`;
+    
+    for (let i = 1; i < pathParts.length; i++) {
+      currentPath += `/${pathParts[i]}`;
+      folderPaths.push(currentPath);
+    }
+
+    // Single query to get all folders in the path
+    if (folderPaths.length > 0) {
+      const folders = await FolderModel.find({
+        path: { $in: folderPaths },
+        isDeleted: false
+      }).lean();
+
+      // Create a map for quick lookup
+      const folderMap = new Map();
+      folders.forEach(f => folderMap.set(f.path, f));
+
+      // Add folders in correct order
+      folderPaths.forEach(path => {
+        const folder = folderMap.get(path);
+        if (folder) {
+          breadcrumbs.push({
+            id: folder._id.toString(),
+            name: folder.name,
+            type: "folder"
+          });
+        }
+      });
+    }
+  }
+
+  return breadcrumbs;
+}
 
 /**
  * Recursively get all nested children from a folder
