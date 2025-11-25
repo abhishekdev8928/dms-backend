@@ -41,6 +41,13 @@ import {
   getRecentDocumentsSchema
 } from '../validation/documentValidation.js';
 
+import {
+  validateFile,
+  findGroupByExtension,
+  isExtensionBlocked,
+  isMimeTypeBlocked
+} from '../utils/constant.js';
+
 /**
  * Helper function to get user info for activity logging
  */
@@ -66,6 +73,33 @@ export const generatePresignedUrls = async (req, res, next) => {
       throw createHttpError(500, "S3 bucket name is not configured");
     }
 
+    // ✅ VALIDATE ALL FILES FIRST
+    const invalidFiles = [];
+    
+for (const file of files) {
+  // Extract extension safely
+  const ext = file.filename.includes(".")
+    ? `.${file.filename.split(".").pop().toLowerCase()}`
+    : null;
+
+  const validation = validateFile(ext, file.mimeType);
+
+  if (!validation.valid) {
+    invalidFiles.push({
+      filename: file.filename,
+      reason: validation.reason,
+      extension: ext,
+      mimeType: file.mimeType
+    });
+  }
+}
+
+
+
+    if (invalidFiles.length > 0) {
+      throw createHttpError(400, `Invalid files detected: ${JSON.stringify(invalidFiles)}`);
+    }
+
     const timestamp = Date.now();
     const urls = await Promise.all(
       files.map(async (file, index) => {
@@ -81,7 +115,17 @@ export const generatePresignedUrls = async (req, res, next) => {
 
         const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
 
-        return { filename, key, url: signedUrl, mimeType };
+        // ✅ INCLUDE VALIDATION INFO
+        const validation = validateFile(filename, mimeType);
+
+        return { 
+          filename, 
+          key, 
+          url: signedUrl, 
+          mimeType,
+          fileGroup: validation.group,
+          category: validation.category
+        };
       })
     );
 
@@ -109,13 +153,23 @@ export const createDocument = async (req, res, next) => {
     const data = parsed.data.body;
     const createdBy = req.user.id;
 
+    // ✅ VALIDATE FILE USING NEW CONSTANTS
+    const sanitizedExtension = sanitizeInput(data.extension);
+    const sanitizedMimeType = sanitizeInput(data.mimeType);
+    
+    const validation = validateFile(sanitizedExtension, sanitizedMimeType);
+    
+    if (!validation.valid) {
+      throw createHttpError(400, validation.reason);
+    }
+
     const sanitizedData = {
       name: sanitizeInputWithXSS(data.name),
       originalName: sanitizeInputWithXSS(data.originalName),
       parent_id: sanitizeAndValidateId(data.parent_id, "Parent ID"),
       fileUrl: sanitizeInput(data.fileUrl),
-      mimeType: sanitizeInput(data.mimeType),
-      extension: sanitizeInput(data.extension),
+      mimeType: sanitizedMimeType,
+      extension: sanitizedExtension,
       size: data.size,
       description: data.description
         ? sanitizeInputWithXSS(data.description)
@@ -124,10 +178,10 @@ export const createDocument = async (req, res, next) => {
       createdBy,
     };
 
-    sanitizedData.type = DocumentModel.getTypeFromMimeType(
-      sanitizedData.mimeType,
-      sanitizedData.extension
-    );
+    // ✅ USE VALIDATION RESULT FOR TYPE
+    sanitizedData.type = validation.category === 'document' 
+      ? DocumentModel.getTypeFromMimeType(sanitizedData.mimeType, sanitizedData.extension)
+      : validation.category;
 
     // Get parent for folder name
     let parent =
@@ -165,15 +219,16 @@ export const createDocument = async (req, res, next) => {
     document.currentVersionId = initialVersion._id;
     await document.save();
 
-    // ✅ NO ACTIVITY LOG HERE
-    // Frontend will call POST /api/activity/bulk-upload with all uploaded file IDs
-
     res.status(201).json({
       success: true,
       message: "Document uploaded successfully",
       data: {
         ...document.toObject(),
         currentVersion: initialVersion,
+        fileValidation: {
+          group: validation.group,
+          category: validation.category
+        }
       },
     });
   } catch (error) {
@@ -181,6 +236,47 @@ export const createDocument = async (req, res, next) => {
   }
 };
 
+export const validateFileBeforeUpload = async (req, res, next) => {
+  try {
+    const { extension, mimeType } = req.body;
+    
+    if (!extension || !mimeType) {
+      throw createHttpError(400, 'Extension and mimeType are required');
+    }
+
+    const sanitizedExtension = sanitizeInput(extension);
+    const sanitizedMimeType = sanitizeInput(mimeType);
+    
+    const validation = validateFile(sanitizedExtension, sanitizedMimeType);
+    
+    if (!validation.valid) {
+      return res.status(400).json({
+        success: false,
+        valid: false,
+        reason: validation.reason,
+        extension: validation.extension,
+        mimeType: validation.mimeType
+      });
+    }
+
+    // Get format group info
+    const formatGroup = findGroupByExtension(sanitizedExtension);
+
+    res.status(200).json({
+      success: true,
+      valid: true,
+      data: {
+        group: validation.group,
+        category: validation.category,
+        description: formatGroup?.description,
+        allowedExtensions: formatGroup?.extensions,
+        message: 'File is valid and allowed'
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 /**
  * Add tags to document
  * No activity logging needed for tag operations

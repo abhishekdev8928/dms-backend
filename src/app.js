@@ -2,8 +2,7 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import { sanitizeAndValidateId, sanitizeObjectXSS } from "./utils/helper.js";
-import createHttpError from "http-errors";
+import commonRoutes from "./routes/commonRoutes.js";
 import activityRoutes from './routes/activityRoutes.js';
 
 
@@ -20,7 +19,9 @@ import searchRoutes from "./routes/searchRoutes.js";
 import restoreRoutes from "./routes/restoreRoutes.js"
 import { bulkSoftDelete } from "./controller/commonController.js";
 import { authenticateUser } from "./middleware/authMiddleware.js";
-console.log("from here" ,process.env.MONGO_DB_URL)
+
+
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -144,6 +145,7 @@ app.use("/api/children",treeRoutes);
 
 app.use("/api/trash" , restoreRoutes)
 app.use('/api/activity', activityRoutes);
+app.use("/api/common", commonRoutes);
 
 
 app.use("/api/search",searchRoutes)

@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import DocumentModel from "./documentModel.js";
 
+
 const folderSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -19,13 +20,11 @@ const folderSchema = new mongoose.Schema({
   parent_id: {
     type: mongoose.Schema.Types.ObjectId,
     required: [true, 'Parent ID is required']
-    // ❌ Removed index: true (we'll define composite index below)
   },
 
   // Path for fast lookups and breadcrumbs
   path: {
     type: String
-    // ❌ Removed index: true
   },
 
   // Optional fields
@@ -40,11 +39,16 @@ const folderSchema = new mongoose.Schema({
     match: [/^#[0-9A-F]{6}$/i, 'Please provide a valid hex color code']
   },
 
+  // Starred field
+  starred: {
+    type: Boolean,
+    default: false
+  },
+
   // Soft delete
   isDeleted: {
     type: Boolean,
     default: false
-    // ❌ Removed index: true
   },
   deletedAt: {
     type: Date,
@@ -65,7 +69,6 @@ const folderSchema = new mongoose.Schema({
   toJSON: { virtuals: true },
   toObject: { virtuals: true }
 });
-
 
 // ✅ Cleaned up index definitions
 folderSchema.index({ parent_id: 1 });

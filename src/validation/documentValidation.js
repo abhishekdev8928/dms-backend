@@ -1,32 +1,68 @@
+/**
+ * UPDATED DOCUMENT VALIDATION SCHEMA
+ * Now uses constants from constant.js file instead of hardcoded values
+ */
+
 import { z } from 'zod';
 import mongoose from 'mongoose';
-
-// Allowed file formats
-export const ALLOWED_EXTENSIONS = [
-  "pdf",
-  "docx",
-  "xlsx",
-  "jpg",
-  "jpeg",
-  "png",
-  "zip",
-];
-
-export const ALLOWED_MIME_TYPES = [
-  "application/pdf",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "image/jpeg",
-  "image/png",
-  "application/zip",
-  "application/x-zip-compressed",
-];
+import {
+  ALLOWED_EXTENSIONS,
+  ALLOWED_MIME_TYPES,
+  validateFile,
+  isExtensionBlocked,
+  isMimeTypeBlocked
+} from '../utils/constant.js';
 
 // Custom validators
 const objectIdValidator = z.string().refine(
   (val) => mongoose.Types.ObjectId.isValid(val),
   { message: 'Invalid ObjectId format' }
 );
+
+// ✅ Custom file extension validator using constants
+const fileExtensionValidator = z.string()
+  .min(1, 'File extension is required')
+  .max(10, 'File extension too long')
+  .regex(/^\.?[a-z0-9]+$/i, 'Invalid file extension format')
+  .transform(val => {
+    // Normalize: remove dot if present, convert to lowercase
+    return val.startsWith('.') ? val.slice(1).toLowerCase() : val.toLowerCase();
+  })
+  .refine(
+    (ext) => {
+      const withDot = `.${ext}`;
+      return ALLOWED_EXTENSIONS.includes(withDot);
+    },
+    (ext) => ({ 
+      message: `File extension '.${ext}' is not allowed. Check /api/documents/allowed-formats for supported formats.` 
+    })
+  )
+  .refine(
+    (ext) => {
+      const withDot = `.${ext}`;
+      return !isExtensionBlocked(withDot);
+    },
+    (ext) => ({ 
+      message: `File extension '.${ext}' is blocked for security reasons` 
+    })
+  );
+
+// ✅ Custom MIME type validator using constants
+const mimeTypeValidator = z.string()
+  .min(1, 'MIME type is required')
+  .transform(val => val.toLowerCase())
+  .refine(
+    (mimeType) => ALLOWED_MIME_TYPES.includes(mimeType),
+    (mimeType) => ({ 
+      message: `MIME type '${mimeType}' is not allowed. Check /api/documents/allowed-formats for supported formats.` 
+    })
+  )
+  .refine(
+    (mimeType) => !isMimeTypeBlocked(mimeType),
+    (mimeType) => ({ 
+      message: `MIME type '${mimeType}' is blocked for security reasons` 
+    })
+  );
 
 // ===== DOCUMENT VALIDATION SCHEMAS =====
 
@@ -40,23 +76,26 @@ export const generatePresignedUrlsSchema = z.object({
         filename: z.string()
           .min(1, 'Filename is required')
           .max(255, 'Filename cannot exceed 255 characters')
-          .regex(/^[^<>:"/\\|?*\x00-\x1F]+$/, 'Filename contains invalid characters')
-          .refine(
-            (filename) => {
-              const ext = filename.split('.').pop()?.toLowerCase();
-              return ext && ALLOWED_EXTENSIONS.includes(ext);
-            },
-            { message: `File extension must be one of: ${ALLOWED_EXTENSIONS.join(', ')}` }
-          ),
-        mimeType: z.string()
-          .min(1, 'MIME type is required')
-          .refine(
-            (mimeType) => ALLOWED_MIME_TYPES.includes(mimeType),
-            { message: `MIME type must be one of: ${ALLOWED_MIME_TYPES.join(', ')}` }
-          )
+          .regex(/^[^<>:"/\\|?*\x00-\x1F]+$/, 'Filename contains invalid characters'),
+        mimeType: mimeTypeValidator
       })
     ).min(1, 'At least one file is required')
       .max(10, 'Maximum 10 files allowed per request')
+      .superRefine((files, ctx) => {
+        // ✅ Validate each file using the comprehensive validateFile function
+        files.forEach((file, index) => {
+          const ext = file.filename.split('.').pop()?.toLowerCase() || '';
+          const validation = validateFile(`.${ext}`, file.mimeType);
+          
+          if (!validation.valid) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `File "${file.filename}": ${validation.reason}`,
+              path: [index]
+            });
+          }
+        });
+      })
   })
 });
 
@@ -76,21 +115,8 @@ export const createDocumentSchema = z.object({
     fileUrl: z.string()
       .min(1, 'File URL (S3 key) is required')
       .max(500, 'File URL too long'),
-    mimeType: z.string()
-      .min(1, 'MIME type is required')
-      .refine(
-        (mimeType) => ALLOWED_MIME_TYPES.includes(mimeType),
-        { message: `MIME type must be one of: ${ALLOWED_MIME_TYPES.join(', ')}` }
-      ),
-    extension: z.string()
-      .min(1, 'File extension is required')
-      .max(10, 'File extension too long')
-      .regex(/^[a-z0-9]+$/i, 'Invalid file extension format')
-      .transform(val => val.toLowerCase())
-      .refine(
-        (ext) => ALLOWED_EXTENSIONS.includes(ext),
-        { message: `File extension must be one of: ${ALLOWED_EXTENSIONS.join(', ')}` }
-      ),
+    mimeType: mimeTypeValidator,
+    extension: fileExtensionValidator,
     size: z.number()
       .int('Size must be an integer')
       .positive('Size must be positive')
@@ -108,6 +134,17 @@ export const createDocumentSchema = z.object({
     ).max(20, 'Maximum 20 tags allowed')
       .optional()
       .default([])
+  }).superRefine((data, ctx) => {
+    // ✅ Final validation: ensure extension and MIME type match
+    const validation = validateFile(`.${data.extension}`, data.mimeType);
+    
+    if (!validation.valid) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: validation.reason,
+        path: ['extension']
+      });
+    }
   })
 });
 
@@ -241,15 +278,7 @@ export const findByTagsSchema = z.object({
  */
 export const findByExtensionSchema = z.object({
   params: z.object({
-    ext: z.string()
-      .min(1, 'File extension is required')
-      .max(10, 'File extension too long')
-      .regex(/^[a-z0-9]+$/i, 'Invalid file extension format')
-      .transform(val => val.toLowerCase())
-      .refine(
-        (ext) => ALLOWED_EXTENSIONS.includes(ext),
-        { message: `File extension must be one of: ${ALLOWED_EXTENSIONS.join(', ')}` }
-      )
+    ext: fileExtensionValidator
   })
 });
 
@@ -298,22 +327,8 @@ export const createVersionSchema = z.object({
       .positive('Size must be positive')
       .max(5 * 1024 * 1024 * 1024, 'File size cannot exceed 5GB'),
     
-    mimeType: z.string()
-      .min(1, 'MIME type is required')
-      .refine(
-        (mimeType) => ALLOWED_MIME_TYPES.includes(mimeType),
-        { message: `MIME type must be one of: ${ALLOWED_MIME_TYPES.join(', ')}` }
-      ),
-    
-    extension: z.string()
-      .min(1, 'File extension is required')
-      .max(10, 'File extension too long')
-      .regex(/^[a-z0-9]+$/i, 'Invalid file extension format')
-      .transform(val => val.toLowerCase())
-      .refine(
-        (ext) => ALLOWED_EXTENSIONS.includes(ext),
-        { message: `File extension must be one of: ${ALLOWED_EXTENSIONS.join(', ')}` }
-      ),
+    mimeType: mimeTypeValidator,
+    extension: fileExtensionValidator,
     
     // Optional: Override document name for this version
     name: z.string()
@@ -340,6 +355,17 @@ export const createVersionSchema = z.object({
       .max(128, 'File hash too long')
       .trim()
       .optional()
+  }).superRefine((data, ctx) => {
+    // ✅ Validate extension and MIME type compatibility
+    const validation = validateFile(`.${data.extension}`, data.mimeType);
+    
+    if (!validation.valid) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: validation.reason,
+        path: ['extension']
+      });
+    }
   })
 });
 

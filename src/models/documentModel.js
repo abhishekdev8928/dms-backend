@@ -1,4 +1,10 @@
 import mongoose from "mongoose";
+import {
+  findGroupByExtension,
+  findGroupByMimeType,
+  validateFile,
+  areExtensionsEquivalent
+} from '../utils/constant.js'; // Adjust path as needed
 
 const documentSchema = new mongoose.Schema({
   name: {
@@ -17,7 +23,6 @@ const documentSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Type is required'],
     enum: [
-      'folder',
       'pdf',
       'document',
       'spreadsheet',
@@ -36,6 +41,11 @@ const documentSchema = new mongoose.Schema({
   parent_id: {
     type: mongoose.Schema.Types.ObjectId,
     required: [true, 'Parent folder ID is required']
+  },
+
+  starred: {
+    type: Boolean,
+    default: false
   },
 
   path: {
@@ -103,7 +113,7 @@ const documentSchema = new mongoose.Schema({
   deletedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    default: null // <-- NEW FIELD
+    default: null
   },
 
   // User Tracking
@@ -188,7 +198,7 @@ documentSchema.statics.getTypeFromMimeType = function (mimeType, extension) {
 
 
 // Virtuals
-documentSchema.virtual('sizeFormatted').get(function() {
+documentSchema.virtual('sizeFormatted').get(function () {
   const bytes = this.size;
   if (bytes === 0) return '0 Bytes';
   const k = 1024;
@@ -197,7 +207,7 @@ documentSchema.virtual('sizeFormatted').get(function() {
   return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
 });
 
-documentSchema.virtual('fileCategory').get(function() {
+documentSchema.virtual('fileCategory').get(function () {
   const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'webp'];
   const docExts = ['pdf', 'doc', 'docx', 'txt', 'rtf', 'odt'];
   const spreadsheetExts = ['xls', 'xlsx', 'csv', 'ods'];
@@ -205,9 +215,9 @@ documentSchema.virtual('fileCategory').get(function() {
   const videoExts = ['mp4', 'avi', 'mov', 'wmv', 'flv', 'webm'];
   const audioExts = ['mp3', 'wav', 'ogg', 'flac', 'm4a'];
   const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz'];
-  
+
   const ext = this.extension.toLowerCase();
-  
+
   if (imageExts.includes(ext)) return 'image';
   if (docExts.includes(ext)) return 'document';
   if (spreadsheetExts.includes(ext)) return 'spreadsheet';
@@ -215,11 +225,11 @@ documentSchema.virtual('fileCategory').get(function() {
   if (videoExts.includes(ext)) return 'video';
   if (audioExts.includes(ext)) return 'audio';
   if (archiveExts.includes(ext)) return 'archive';
-  
+
   return 'other';
 });
 
-documentSchema.virtual('displayName').get(function() {
+documentSchema.virtual('displayName').get(function () {
   if (this.name.endsWith(`.${this.extension}`)) {
     return this.name;
   }
@@ -256,119 +266,126 @@ documentSchema.methods.buildPath = async function () {
   return this.path;
 };
 
-documentSchema.methods.getBreadcrumbs = function() {
+documentSchema.methods.getBreadcrumbs = function () {
   const parts = this.path.split('/').filter(part => part.length > 0);
   return parts;
 };
 
-documentSchema.methods.getDepartment = async function() {
+documentSchema.methods.getDepartment = async function () {
   const DepartmentModel = mongoose.model('Department');
   const departmentName = this.path.split('/')[1];
   return DepartmentModel.findOne({ name: departmentName });
 };
 
-documentSchema.methods.getParentFolder = async function() {
+documentSchema.methods.getParentFolder = async function () {
   const FolderModel = mongoose.model('Folder');
   return FolderModel.findById(this.parent_id);
 };
 
-// ✅ FIXED: Re-upload method - replaces ALL metadata with new file
-// ✅ FIXED: Re-upload method - validates extension and preserves display name
-// 📌 DOCUMENT MODEL — REUPLOAD LOGIC
+// ✅ IMPROVED: Re-upload method using constant file format groups
 documentSchema.methods.reUpload = async function (
   newFileData,
   changeDescription,
   userId
 ) {
-  
-
   const DocumentVersionModel = mongoose.model("DocumentVersion");
   const DocumentModel = mongoose.model("Document");
 
-  // 1️⃣ Validate extension
-  const currentExtension = this.extension.toLowerCase();
-  const newExtension = newFileData.extension.toLowerCase();
+  // 1️⃣ Normalize extensions (add dot if missing)
+  const currentExtension = this.extension.startsWith('.')
+    ? this.extension.toLowerCase()
+    : `.${this.extension.toLowerCase()}`;
 
-  if (currentExtension !== newExtension) {
-    throw new Error(
-      `File format mismatch. Expected .${currentExtension} but received .${newExtension}`
-    );
+  const newExtension = newFileData.extension.startsWith('.')
+    ? newFileData.extension.toLowerCase()
+    : `.${newFileData.extension.toLowerCase()}`;
+
+  // 2️⃣ Validate using format groups from constants
+  if (!areExtensionsEquivalent(currentExtension, newExtension)) {
+    const currentGroup = findGroupByExtension(currentExtension);
+    const newGroup = findGroupByExtension(newExtension);
+
+   throw new Error(
+  `File types must match.`
+);
+
+
   }
 
-  // 2️⃣ Determine file type
+  // 3️⃣ Validate the new file completely
+  const validation = validateFile(newExtension, newFileData.mimeType);
+  if (!validation.valid) {
+    throw new Error(`File validation failed: ${validation.reason}`);
+  }
+
+  // 4️⃣ Determine file type
   const fileType = DocumentModel.getTypeFromMimeType(
     newFileData.mimeType,
-    newFileData.extension
+    newExtension
   );
 
-  // 3️⃣ Create a new version (🔥 FIXED NAME HANDLING)
+  // 5️⃣ Create a new version
   const newVersion = await DocumentVersionModel.createNewVersion(
     this._id,
     {
       ...newFileData,
-
-      // NAME RULES:
-      // ✔ "name" = DO NOT TAKE FROM FRONTEND
-      // ✔ Frozen = use main document name
+      // Keep the display name frozen
       name: this.name,
-
-      // ✔ original uploaded filename (correct)
+      // Store the actual uploaded filename
       originalName: newFileData.originalName,
-
       type: fileType,
+      // Ensure extension has proper format
+      extension: newExtension.replace('.', '')
     },
     changeDescription || "File re-uploaded",
     userId
   );
 
-  // 4️⃣ Update only metadata (NOT names)
+  // 6️⃣ Update document metadata (including extension if changed within same group)
   this.fileUrl = newFileData.fileUrl;
   this.size = newFileData.size;
   this.mimeType = newFileData.mimeType;
+  this.extension = newExtension.replace('.', ''); // Store without dot
   this.version = newVersion.versionNumber;
   this.currentVersionId = newVersion._id;
   this.updatedBy = userId;
 
   // ❌ Do NOT change:
-  // this.name
-  // this.originalName
+  // this.name (frozen - user-facing display name)
+  // this.originalName (keeps first upload's original filename)
 
   await this.save();
 
   return newVersion;
 };
 
-
-
-
-
 // ✅ NEW: Rename method - only updates name, keeps file metadata
-documentSchema.methods.rename = async function(
+documentSchema.methods.rename = async function (
   newName,
   userId,
   session = null
 ) {
   const DocumentVersionModel = mongoose.model('DocumentVersion');
-  
+
   // Update Document name
   this.name = newName;
   this.updatedBy = userId;
-  
+
   // Rebuild path
   await this.buildPath();
   await this.save({ session });
-  
+
   // Update ONLY the latest version's name
   await DocumentVersionModel.updateLatestVersionName(
     this._id,
     newName,
     session
   );
-  
+
   return this;
 };
 
-documentSchema.methods.getAllVersions = async function() {
+documentSchema.methods.getAllVersions = async function () {
   const DocumentVersionModel = mongoose.model('DocumentVersion');
   return DocumentVersionModel.find({ documentId: this._id })
     .populate('createdBy', 'name email avatar')
@@ -376,7 +393,7 @@ documentSchema.methods.getAllVersions = async function() {
     .lean();
 };
 
-documentSchema.methods.getVersion = async function(versionNumber) {
+documentSchema.methods.getVersion = async function (versionNumber) {
   const DocumentVersionModel = mongoose.model('DocumentVersion');
   return DocumentVersionModel.findOne({
     documentId: this._id,
@@ -384,37 +401,7 @@ documentSchema.methods.getVersion = async function(versionNumber) {
   });
 };
 
-// ✅ FIXED: Revert creates new version with old version's metadata
-// documentSchema.methods.revertToVersion = async function(versionNumber, userId, session = null) {
-//   const DocumentVersionModel = mongoose.model('DocumentVersion');
-  
-//   const targetVersion = await DocumentVersionModel.findOne({
-//     documentId: this._id,
-//     versionNumber: versionNumber
-//   }).session(session);
-  
-//   if (!targetVersion) {
-//     throw new Error(`Version ${versionNumber} not found`);
-//   }
-  
-//   // Create new version based on old version's file
-//   const revertedFileData = {
-//     fileUrl: targetVersion.fileUrl,
-//     size: targetVersion.size,
-//     mimeType: targetVersion.mimeType,
-//     extension: targetVersion.extension,
-//     name: targetVersion.name,
-//     originalName: targetVersion.originalName
-//   };
-  
-//   return this.reUpload(
-//     revertedFileData,
-//     `Reverted to version ${versionNumber}`,
-//     userId,
-//     session
-//   );
-// };
-
+// ✅ IMPROVED: Revert to version method
 documentSchema.methods.revertToVersion = async function (targetVersionNumber, userId) {
   const DocumentVersion = mongoose.model("DocumentVersion");
 
@@ -426,7 +413,17 @@ documentSchema.methods.revertToVersion = async function (targetVersionNumber, us
 
   if (!oldVersion) throw new Error("Version not found");
 
-  // 2. Create NEW version based on old version
+  // 2. Validate that old version's format is still compatible
+  const currentExt = this.extension.startsWith('.') ? this.extension : `.${this.extension}`;
+  const oldExt = oldVersion.extension.startsWith('.') ? oldVersion.extension : `.${oldVersion.extension}`;
+
+  if (!areExtensionsEquivalent(currentExt, oldExt)) {
+    throw new Error(
+      `Cannot revert: format incompatibility between current version and version ${targetVersionNumber}`
+    );
+  }
+
+  // 3. Create NEW version based on old version
   const newVersion = await DocumentVersion.createNewVersion(
     this._id,
     {
@@ -442,72 +439,71 @@ documentSchema.methods.revertToVersion = async function (targetVersionNumber, us
     userId
   );
 
-  // 3. Update Document to reflect this restored version
+  // 4. Update Document to reflect this restored version
   this.name = newVersion.name;
   this.originalName = newVersion.originalName;
   this.mimeType = newVersion.mimeType;
   this.extension = newVersion.extension;
   this.size = newVersion.size;
   this.fileUrl = newVersion.fileUrl;
+  this.version = newVersion.versionNumber;
+  this.currentVersionId = newVersion._id;
+  this.updatedBy = userId;
 
   await this.save();
 
   return newVersion;
 };
 
-
-
-
-
-documentSchema.methods.moveTo = async function(newParentId, session = null) {
+documentSchema.methods.moveTo = async function (newParentId, session = null) {
   const FolderModel = mongoose.model('Folder');
-  
+
   const folder = await FolderModel.findById(newParentId).session(session);
   if (!folder) {
     throw new Error('Target folder not found');
   }
-  
+
   const oldDepartment = await this.getDepartment();
   const newDepartmentName = folder.path.split('/')[1];
   const DepartmentModel = mongoose.model('Department');
   const newDepartment = await DepartmentModel.findOne({ name: newDepartmentName }).session(session);
-  
+
   this.parent_id = newParentId;
   await this.buildPath();
   await this.save({ session });
-  
+
   if (oldDepartment && newDepartment && !oldDepartment._id.equals(newDepartment._id)) {
     await oldDepartment.updateStats();
     await newDepartment.updateStats();
   } else if (oldDepartment) {
     await oldDepartment.updateStats();
   }
-  
+
   return this;
 };
 
-documentSchema.methods.softDelete = async function(session = null) {
+documentSchema.methods.softDelete = async function (session = null) {
   this.isDeleted = true;
   this.deletedAt = new Date();
   await this.save({ session });
   return this;
 };
 
-documentSchema.methods.restore = async function(session = null) {
+documentSchema.methods.restore = async function (session = null) {
   this.isDeleted = false;
   this.deletedAt = null;
   await this.save({ session });
   return this;
 };
 
-documentSchema.methods.addTags = async function(newTags, session = null) {
+documentSchema.methods.addTags = async function (newTags, session = null) {
   const uniqueTags = [...new Set([...this.tags, ...newTags.map(t => t.toLowerCase().trim())])];
   this.tags = uniqueTags;
   await this.save({ session });
   return this;
 };
 
-documentSchema.methods.removeTags = async function(tagsToRemove, session = null) {
+documentSchema.methods.removeTags = async function (tagsToRemove, session = null) {
   const tagsSet = new Set(tagsToRemove.map(t => t.toLowerCase().trim()));
   this.tags = this.tags.filter(tag => !tagsSet.has(tag));
   await this.save({ session });
@@ -515,7 +511,7 @@ documentSchema.methods.removeTags = async function(tagsToRemove, session = null)
 };
 
 // Static methods
-documentSchema.statics.findByFolder = function(folderId, includeDeleted = false) {
+documentSchema.statics.findByFolder = function (folderId, includeDeleted = false) {
   const query = { parent_id: folderId };
   if (!includeDeleted) {
     query.isDeleted = false;
@@ -523,53 +519,53 @@ documentSchema.statics.findByFolder = function(folderId, includeDeleted = false)
   return this.find(query).sort({ name: 1 });
 };
 
-documentSchema.statics.searchByName = function(searchTerm, departmentName = null, options = {}) {
+documentSchema.statics.searchByName = function (searchTerm, departmentName = null, options = {}) {
   const query = {
     $text: { $search: searchTerm },
     isDeleted: false
   };
-  
+
   if (departmentName) {
     const escapedName = departmentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     query.path = new RegExp(`^/${escapedName}/`);
   }
-  
+
   return this.find(query, { score: { $meta: 'textScore' } })
     .sort({ score: { $meta: 'textScore' } })
     .limit(options.limit || 20);
 };
 
-documentSchema.statics.findByPath = function(fullPath) {
+documentSchema.statics.findByPath = function (fullPath) {
   return this.findOne({
     path: fullPath,
     isDeleted: false
   });
 };
 
-// ✅ FIXED: Pre-save middleware - only rebuild path if parent changes
-documentSchema.pre('save', async function(next) {
+// ✅ Pre-save middleware
+documentSchema.pre('save', async function (next) {
   if (this.isNew && !this.extension && this.originalName) {
     const match = this.originalName.match(/\.([^.]+)$/);
     if (match) {
       this.extension = match[1].toLowerCase();
     }
   }
-  
+
   if (this.isModified('tags')) {
     this.tags = [...new Set(this.tags.map(tag => tag.toLowerCase().trim()))];
   }
-  
+
   // Only rebuild path if parent_id changes (move operation)
   // Name changes are handled by rename() method
   if (this.isModified('parent_id')) {
     await this.buildPath();
   }
-  
+
   next();
 });
 
 // Post-save middleware to update department stats
-documentSchema.post('save', async function(doc) {
+documentSchema.post('save', async function (doc) {
   if (this.wasNew || this.isModified('isDeleted') || this.isModified('size')) {
     const department = await this.getDepartment();
     if (department) {
@@ -579,7 +575,7 @@ documentSchema.post('save', async function(doc) {
 });
 
 // Post-remove middleware to update department stats
-documentSchema.post('remove', async function(doc) {
+documentSchema.post('remove', async function (doc) {
   const department = await this.getDepartment();
   if (department) {
     await department.updateStats();
