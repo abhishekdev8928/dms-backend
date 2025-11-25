@@ -45,6 +45,7 @@ export const getTrashItems = async (req, res, next) => {
       deletedAt: { $gte: thirtyDaysAgo, $ne: null }
     };
 
+    // Get all deleted folders
     const [folders, totalFolders] = await Promise.all([
       FolderModel.find(baseQuery)
         .populate("createdBy", "name username email profilePic")
@@ -53,6 +54,7 @@ export const getTrashItems = async (req, res, next) => {
       FolderModel.countDocuments(baseQuery)
     ]);
 
+    // Get all deleted documents
     const [documents, totalDocuments] = await Promise.all([
       DocumentModel.find(baseQuery)
         .populate("deletedBy", "name username email profilePic")
@@ -61,11 +63,106 @@ export const getTrashItems = async (req, res, next) => {
       DocumentModel.countDocuments(baseQuery)
     ]);
 
-    let items = [...folders, ...documents].sort(
+    console.log('=== TRASH FILTERING DEBUG ===');
+    console.log('Deleted folders:', folders.map(f => ({ 
+      id: f._id, 
+      name: f.name, 
+      path: f.path
+    })));
+    console.log('Deleted documents:', documents.map(d => ({ 
+      id: d._id, 
+      name: d.name, 
+      path: d.path 
+    })));
+
+    // Create a Map of deleted folder full paths for efficient lookup
+    const deletedFolderMap = new Map();
+    folders.forEach(folder => {
+      // The folder.path already contains the full path to this folder
+      // We just need to ensure it ends with a slash
+      let fullPath = folder.path;
+      if (!fullPath.startsWith('/')) fullPath = '/' + fullPath;
+      if (!fullPath.endsWith('/')) fullPath = fullPath + '/';
+      
+      // Normalize by removing duplicate slashes
+      fullPath = fullPath.replace(/\/+/g, '/');
+      
+      deletedFolderMap.set(fullPath, folder);
+      console.log(`Folder "${folder.name}" full path: "${fullPath}"`);
+    });
+
+    // Filter out folders whose parent folders are also deleted
+    const filteredFolders = folders.filter(folder => {
+      let folderPath = folder.path;
+      if (!folderPath.startsWith('/')) folderPath = '/' + folderPath;
+      if (!folderPath.endsWith('/')) folderPath = folderPath + '/';
+      
+      // Normalize path
+      folderPath = folderPath.replace(/\/+/g, '/');
+      
+      // Root level folders (no parent) - always show
+      if (folderPath === '/') return true;
+      
+      // Check if this folder's path starts with any deleted folder's full path
+      for (const [deletedPath, deletedFolder] of deletedFolderMap) {
+        // Skip checking against itself
+        if (deletedFolder._id.toString() === folder._id.toString()) continue;
+        
+        // If this folder's path starts with a deleted folder's full path,
+        // it means that deleted folder is a parent - exclude this folder
+        if (folderPath.startsWith(deletedPath)) {
+          console.log(`❌ Excluding folder "${folder.name}" (path: "${folderPath}") - parent "${deletedFolder.name}" (path: "${deletedPath}") is deleted`);
+          return false;
+        }
+      }
+      
+      console.log(`✅ Including folder "${folder.name}" (path: "${folderPath}")`);
+      return true;
+    });
+
+    // Filter out documents whose parent folders are deleted
+    const filteredDocuments = documents.filter(doc => {
+      // Get the document's parent path (the folder it's in)
+      // For a document at /welcome/testing/file.jpg
+      // We need to check if /welcome/testing/ is a deleted folder
+      let docPath = doc.path;
+      if (!docPath) docPath = '/';
+      if (!docPath.startsWith('/')) docPath = '/' + docPath;
+      if (!docPath.endsWith('/')) docPath = docPath + '/';
+      
+      // Normalize path
+      docPath = docPath.replace(/\/+/g, '/');
+      
+      console.log(`\nChecking document: "${doc.name}" with path: "${docPath}"`);
+      
+      // Check if the document's path matches or starts with any deleted folder's full path
+      for (const [deletedPath, deletedFolder] of deletedFolderMap) {
+        console.log(`  Comparing with deleted folder: "${deletedFolder.name}" (${deletedPath})`);
+        console.log(`  Does "${docPath}" start with "${deletedPath}"? ${docPath.startsWith(deletedPath)}`);
+        console.log(`  Does "${docPath}" equal "${deletedPath}"? ${docPath === deletedPath}`);
+        
+        // The document is inside this deleted folder if its path equals or starts with the folder's full path
+        if (docPath === deletedPath || docPath.startsWith(deletedPath)) {
+          console.log(`❌ Excluding document "${doc.name}" (path: "${docPath}") - parent folder "${deletedFolder.name}" (path: "${deletedPath}") is deleted`);
+          return false;
+        }
+      }
+      
+      console.log(`✅ Including document "${doc.name}" (path: "${docPath}")`);
+      return true;
+    });
+
+    console.log('=== FILTERING RESULTS ===');
+    console.log('Filtered folders:', filteredFolders.length);
+    console.log('Filtered documents:', filteredDocuments.length);
+    console.log('===========================');
+
+    // Combine and sort filtered items
+    let items = [...filteredFolders, ...filteredDocuments].sort(
       (a, b) => new Date(b.deletedAt) - new Date(a.deletedAt)
     );
 
-    const totalItems = totalFolders + totalDocuments;
+    const totalItems = filteredFolders.length + filteredDocuments.length;
     items = items.slice(skip, skip + limit);
 
     const data = items.map((item) => {

@@ -102,8 +102,8 @@ const activityLogSchema = new mongoose.Schema({
   enum: [
     'FILES_UPLOADED',
     'FILE_UPLOADED',
-    'FILE_VERSION_UPLOADED',      // ✅ For reupload
-    'FILE_VERSION_RESTORED',      // ✅ NEW - For revert to version
+    'FILE_VERSION_UPLOADED',
+    'FILE_VERSION_RESTORED',
     'FILE_RENAMED',
     'FILE_MOVED',
     'ITEMS_DELETED',
@@ -116,7 +116,10 @@ const activityLogSchema = new mongoose.Schema({
     'FOLDER_MOVED',
     'FOLDER_DELETED',
     'FOLDER_RESTORED',
-    'ITEMS_RESTORED'
+    'ITEMS_RESTORED',
+    'ITEMS_PERMANENTLY_DELETED',     // ✅ ADD THIS
+    'FILE_PERMANENTLY_DELETED',      // ✅ ADD THIS
+    'FOLDER_PERMANENTLY_DELETED'     // ✅ ADD THIS
   ],
   index: true
 },
@@ -1123,6 +1126,15 @@ activityLogSchema.methods.getMessage = function() {
     case 'ITEMS_RESTORED':
       return `${userName} restored ${bulkOperation.itemCount} items`;
     
+     case 'ITEMS_PERMANENTLY_DELETED':
+      return `${userName} permanently deleted ${bulkOperation.itemCount} items`;
+    
+    case 'FILE_PERMANENTLY_DELETED':
+      return `${userName} permanently deleted ${target.name}`;
+    
+    case 'FOLDER_PERMANENTLY_DELETED':
+      return `${userName} permanently deleted folder ${target.folderName}`;
+    
     default:
       return 'Unknown action';
   }
@@ -1215,6 +1227,111 @@ activityLogSchema.pre('updateOne', function(next) {
 activityLogSchema.pre('updateMany', function(next) {
   next(new Error('Activity logs are immutable and cannot be updated'));
 });
+
+
+/**
+ * Log bulk permanent delete operation
+ * This logs when items are permanently deleted from trash
+ */
+activityLogSchema.statics.logBulkPermanentDelete = async function(userId, items, userInfo) {
+  try {
+    if (!userInfo || !userInfo.name || !userInfo.email) {
+      throw new Error('userInfo with name and email is required');
+    }
+
+    const userSnapshot = {
+      id: userId.toString(),
+      name: userInfo.name,
+      email: userInfo.email,
+      avatar: userInfo.avatar || null
+    };
+
+    // Single item permanent delete
+    if (items.length === 1) {
+      const item = items[0];
+      const parentFolder = await getParentFolderSnapshot(item.parent_id);
+      const ancestors = await getAncestorChain(item.parent_id);
+      const fullPath = buildFullPath(ancestors, item.name);
+      
+      if (item.type === 'file' || item.itemType === 'file' || item.itemType === 'document') {
+        return await this.create({
+          userId: userId.toString(),
+          userSnapshot,
+          action: 'FILE_PERMANENTLY_DELETED',
+          targetType: 'file',
+          target: {
+            id: item.id?.toString() || item._id?.toString(),
+            name: item.name,
+            extension: item.extension || '',
+            type: item.type || item.itemType || '',
+            size: Number(item.size) || 0,
+            path: fullPath
+          },
+          parentFolder,
+          ancestors,
+          fullPath
+        });
+      } else {
+        return await this.create({
+          userId: userId.toString(),
+          userSnapshot,
+          action: 'FOLDER_PERMANENTLY_DELETED',
+          targetType: 'folder',
+          target: {
+            id: item.id?.toString() || item._id?.toString(),
+            folderName: item.name,
+            folderPath: fullPath
+          },
+          parentFolder,
+          ancestors,
+          fullPath
+        });
+      }
+    }
+    
+    // Multiple items permanent delete
+    const firstItem = items[0];
+    const parentFolder = await getParentFolderSnapshot(firstItem.parent_id);
+    const ancestors = await getAncestorChain(firstItem.parent_id);
+    const fullPath = buildFullPath(ancestors);
+    
+    // Build item snapshots with proper folder information
+    const itemSnapshots = await Promise.all(
+      items.map(async (item) => {
+        // Get each item's specific parent folder info
+        const itemParentFolder = await getParentFolderSnapshot(item.parent_id);
+        
+        return {
+          id: item.id?.toString() || item._id?.toString(),
+          name: item.name,
+          extension: item.extension || '',
+          type: item.itemType || item.type || '',
+          size: Number(item.size) || 0,
+          folderPath: itemParentFolder?.path || item.path || '',
+          folderName: itemParentFolder?.name || 
+                     (item.itemType === 'folder' || item.type === 'folder' ? item.name : null)
+        };
+      })
+    );
+    
+    return await this.create({
+      userId: userId.toString(),
+      userSnapshot,
+      action: 'ITEMS_PERMANENTLY_DELETED',
+      targetType: 'multiple',
+      parentFolder,
+      ancestors,
+      fullPath,
+      bulkOperation: {
+        itemCount: items.length,
+        items: itemSnapshots
+      }
+    });
+  } catch (error) {
+    console.error('Error logging bulk permanent delete:', error);
+    throw error;
+  }
+};
 
 // ============================================
 // MODEL EXPORT
