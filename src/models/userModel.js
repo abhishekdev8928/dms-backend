@@ -1,22 +1,18 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
-
 const userSchema = new mongoose.Schema(
   {
-    // username
     username: {
       type: String,
       required: true,
       trim: true,
       lowercase: true,
-      // Remove unique: true from here
     },
     email: {
       type: String,
       required: true,
       trim: true,
       lowercase: true,
-      // Remove unique: true from here
     },
     profilePic: {
       type: String,
@@ -29,8 +25,8 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["superadmin", "admin", "team_member", "member_bank"],
-      default: "team_member",
+      enum: ["super_admin", "admin", "department_owner", "member_bank", "user"],
+      default: "user",
     },
     departments: [
       {
@@ -38,6 +34,11 @@ const userSchema = new mongoose.Schema(
         ref: "Department",
       },
     ],
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null, // null for self-registered users
+    },
     isActive: {
       type: Boolean,
       default: true,
@@ -64,7 +65,6 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-
     refreshTokens: [
       {
         token: { type: String },
@@ -79,20 +79,20 @@ const userSchema = new mongoose.Schema(
   }
 );
 
-// ✅ Define all indexes here using schema.index()
+// Add index for createdBy for faster queries
+userSchema.index({ createdBy: 1 });
+
 userSchema.index({ email: 1 }, { unique: true });
 userSchema.index({ username: 1 }, { unique: true });
 userSchema.index({ departments: 1 });
 userSchema.index({ role: 1, isActive: 1 });
 
-// Hash password before saving
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
   this.password = await bcrypt.hash(this.password, 12);
   next();
 });
 
-// Method to compare password
 userSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };

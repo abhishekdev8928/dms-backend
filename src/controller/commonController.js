@@ -236,6 +236,8 @@ export const bulkSoftDelete = async (req, res, next) => {
  * @body { id: string, type: "folder" | "file" }
  */
 export const toggleStarred = async (req, res, next) => {
+
+
   try {
     // Validate request
     const parsed = toggleStarredSchema.safeParse({ body: req.body });
@@ -525,53 +527,75 @@ export const bulkToggleStarred = async (req, res, next) => {
  */
 export const getStarredItems = async (req, res, next) => {
   try {
+    console.log("calling");
     const userId = req.user.id;
+
+    const populateFields = "username email"; // <-- FIXED
 
     // Get starred folders and files
     const [starredFolders, starredFiles] = await Promise.all([
       FolderModel.find({
         starred: true,
         isDeleted: false,
-        createdBy: userId
-      }).select('name type path color starred createdAt updatedAt parent_id'),
+        createdBy: userId,
+      })
+        .select(
+          "name type path color starred createdAt updatedAt parent_id createdBy"
+        )
+        .populate("createdBy", populateFields),
+
       DocumentModel.find({
         starred: true,
         isDeleted: false,
-        createdBy: userId
-      }).select('name displayName type mimeType extension size starred createdAt updatedAt parent_id')
+        createdBy: userId,
+      })
+        .select(
+          "name displayName type mimeType extension size starred createdAt updatedAt parent_id createdBy"
+        )
+        .populate("createdBy", populateFields),
     ]);
 
     // Format response
-    const folders = starredFolders.map(folder => ({
+    const folders = starredFolders.map((folder) => ({
       id: folder._id,
       name: folder.name,
-      type: 'folder',
-      itemType: 'folder',
+      type: "folder",
+      itemType: "folder",
       color: folder.color,
       path: folder.path,
       starred: folder.starred,
       createdAt: folder.createdAt,
       updatedAt: folder.updatedAt,
-      parent_id: folder.parent_id
+      parent_id: folder.parent_id,
+      createdBy: {
+        id: folder.createdBy?._id,
+        username: folder.createdBy?.username, // <-- FIXED
+        email: folder.createdBy?.email,
+      },
     }));
 
-    const files = starredFiles.map(file => ({
+    const files = starredFiles.map((file) => ({
       id: file._id,
       name: file.displayName || file.name,
-      type: 'file',
-      itemType: 'file',
+      type: "file",
+      itemType: "file",
       mimeType: file.mimeType || file.type,
       extension: file.extension,
       size: file.size,
       starred: file.starred,
       createdAt: file.createdAt,
       updatedAt: file.updatedAt,
-      parent_id: file.parent_id
+      parent_id: file.parent_id,
+      createdBy: {
+        id: file.createdBy?._id,
+        username: file.createdBy?.username, // <-- FIXED
+        email: file.createdBy?.email,
+      },
     }));
 
-    // Combine and sort by updatedAt (most recently starred first)
-    const allStarred = [...folders, ...files].sort((a, b) => 
-      new Date(b.updatedAt) - new Date(a.updatedAt)
+    // Combine and sort by updatedAt
+    const allStarred = [...folders, ...files].sort(
+      (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
     );
 
     res.status(200).json({
@@ -581,8 +605,8 @@ export const getStarredItems = async (req, res, next) => {
         total: allStarred.length,
         folders: folders.length,
         files: files.length,
-        items: allStarred
-      }
+        items: allStarred,
+      },
     });
   } catch (error) {
     next(error);

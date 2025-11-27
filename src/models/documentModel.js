@@ -18,6 +18,12 @@ const documentSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Original filename is required']
   },
+  visibility: {
+  type: String,
+  enum: ['private', 'public', 'restricted'],
+  default: 'private',
+  lowercase: true
+},
 
   type: {
     type: String,

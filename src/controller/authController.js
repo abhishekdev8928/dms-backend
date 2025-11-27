@@ -1,5 +1,5 @@
 import UserModel from "../models/userModel.js";
-import { sendOTPEmail, sendPasswordResetEmail } from "../utils/sendEmail.js";
+import { sendOTPEmail, sendPasswordResetEmail, sendWelcomeEmail } from "../utils/sendEmail.js";
 import createHttpError from "http-errors";
 import {
   forgotPasswordSchema,
@@ -8,12 +8,12 @@ import {
   registerSchema,
   resendOtpSchema,
   resetPasswordSchema,
+  superAdminCreateUserSchema,
   verifyOtpSchema,
 } from "../validation/authValidation.js";
 import jwt from "jsonwebtoken";
 import crypto from "node:crypto";
 import { config } from "../config/config.js";
-import mongoose from "mongoose";
 import { 
   sanitizeAndValidateId, 
   sanitizeInput, 
@@ -60,8 +60,8 @@ export const registerUser = async (req, res, next) => {
     const user = await UserModel.create({
       username: sanitizedUsername,
       email: sanitizedEmail,
-      password, // Password will be hashed by pre-save hook
-      role: role || "team_member",
+      password,
+      role: role,
       departments: departments || [],
       otp,
       otpExpires,
@@ -74,6 +74,68 @@ export const registerUser = async (req, res, next) => {
       success: true,
       message: "User registered successfully. Please check your email for OTP.",
       data: { userId: user._id },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Create a new user by super admin
+ * @route   POST /admin/users
+ * @access  Super Admin only
+ */
+export const createUserBySuperAdmin = async (req, res, next) => {
+  try {
+    const parsedData = superAdminCreateUserSchema.safeParse(req.body);
+    validateRequest(parsedData);
+
+    const { username, email, role, departments } = parsedData.data;
+
+    // Sanitize inputs
+    const sanitizedEmail = sanitizeInputWithXSS(email);
+    const sanitizedUsername = sanitizeInputWithXSS(username);
+
+    // Check if user already exists
+    const existingUser = await UserModel.findOne({ email: sanitizedEmail });
+    if (existingUser) {
+      throw createHttpError(400, "User with this email already exists");
+    }
+
+    const existingUsername = await UserModel.findOne({ 
+      username: sanitizedUsername 
+    });
+    if (existingUsername) {
+      throw createHttpError(400, "Username is already taken");
+    }
+
+    // Static temporary password
+    const temporaryPassword = "Welcome@123";
+
+    // Create user without OTP (super admin-verified)
+    const user = await UserModel.create({
+      username: sanitizedUsername,
+      email: sanitizedEmail,
+      password: temporaryPassword, 
+      role: role || "user",
+      isVerified: true,
+      isActive: true,
+      createdBy: req.user.id,
+    });
+
+    // Send welcome email with the temporary password
+    await sendWelcomeEmail(user.email, user.username, temporaryPassword);
+
+    return res.status(201).json({
+      success: true,
+      message: "User created successfully by super admin. Welcome email sent with temporary password.",
+      data: { 
+        userId: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        createdBy: req.user._id
+      },
     });
   } catch (error) {
     next(error);

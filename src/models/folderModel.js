@@ -15,6 +15,12 @@ const folderSchema = new mongoose.Schema({
     enum: ["folder"],
     immutable: true
   },
+  visibility: {
+  type: String,
+  enum: ['private', 'public', 'restricted'],
+  default: 'private',
+  lowercase: true
+},
 
   // Pure parent-child hierarchy - just stores ID, no ref
   parent_id: {

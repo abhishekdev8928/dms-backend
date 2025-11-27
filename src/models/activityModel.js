@@ -1,10 +1,6 @@
 import mongoose from 'mongoose';
 
-// ============================================
-// SUBDOCUMENT SCHEMAS
-// ============================================
 
-// Ancestor in the hierarchy (for breadcrumb trail)
 const AncestorSchema = new mongoose.Schema({
   id: String,
   name: String,

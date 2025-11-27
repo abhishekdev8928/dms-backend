@@ -12,6 +12,13 @@ export const registerSchema = z.object({
   departments: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid department ID')).optional(),
 });
 
+export const superAdminCreateUserSchema = z.object({
+  username: z.string().min(3).max(30),
+  email: z.string().email(),
+  role: z.enum(["super_admin", "admin", "department_owner", "member_bank", "user"]),
+  departments: z.array(z.string()).optional(),
+});
+
 
 export const verifyOtpSchema = z.object({
   userId: z.string().min(1, "User ID is required"), // required userId

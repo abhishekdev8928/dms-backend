@@ -336,7 +336,7 @@ export const getAllUsers = async (req, res) => {
 
     const formattedUsers = users.map((user) => ({
       id: user._id,
-      name: user.username,
+      username: user.username,
       email: user.email,
       profilePic: user.profilePic || generateDefaultAvatar(user.username),
       role: user.role,
