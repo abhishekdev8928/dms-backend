@@ -8,7 +8,7 @@ import activityRoutes from './routes/activityRoutes.js';
 
 const app = express();
 
-// Import routes
+
 import authRoutes from "../src/routes/userRoutes.js";
 import departmentRoutes from "../src/routes/departmentRoutes.js";
 import treeRoutes from "./routes/treeRoutes.js"
@@ -19,7 +19,7 @@ import searchRoutes from "./routes/searchRoutes.js";
 import restoreRoutes from "./routes/restoreRoutes.js"
 import { bulkSoftDelete } from "./controller/commonController.js";
 import { authenticateUser } from "./middleware/authMiddleware.js";
-
+import starredRoutes from "./routes/starredRoutes.js"
 
 
 app.use(helmet({
@@ -145,6 +145,9 @@ app.use("/api/children",treeRoutes);
 
 app.use("/api/trash" , restoreRoutes)
 app.use('/api/activity', activityRoutes);
+
+
+app.use("/api/starred" , starredRoutes);
 app.use("/api/common", commonRoutes);
 
 
