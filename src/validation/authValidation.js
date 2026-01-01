@@ -8,7 +8,7 @@ export const registerSchema = z.object({
     .string()
     .min(6, 'Password must be at least 6 characters')
     .max(50, 'Password must be less than 50 characters'),
-  role: z.enum(['superadmin', 'admin', 'team_member', 'member_bank']).optional(),
+  role: z.enum(['SUPER_ADMIN',"ADMIN","DEPARTMENT_OWNER","USER"]).optional(),
   departments: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid department ID')).optional(),
 });
 
