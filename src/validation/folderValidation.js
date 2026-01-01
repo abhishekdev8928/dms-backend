@@ -26,7 +26,7 @@ const hexColorSchema = z.string()
  */
 export const createFolderSchema = z.object({
   name: safeString(1, 255),
-  parent_id: objectIdSchema,
+  parentId: objectIdSchema,
   description: z.string().trim().max(500).optional().or(z.literal('')),
   color: z.string().regex(/^#[0-9A-F]{6}$/i, "Invalid hex color format").optional().default('#3B82F6')
 });
@@ -98,3 +98,40 @@ export const searchFoldersSchema = z.object({
 export const getFolderByPathSchema = z.object({
   path: safeString(1, 500)
 });
+
+
+
+export const shareFolderSchema = z.object({
+  users: z
+    .array(
+      z.object({
+        userId: z.string().min(1, "User ID is required"),
+        permissions: z
+          .array(
+            z.enum(['view', 'download', 'upload', 'delete', 'share'])
+          )
+          .min(1, "At least one permission is required"),
+      })
+    )
+    .optional()
+    .default([]),
+  
+  groups: z
+    .array(
+      z.object({
+        groupId: z.string().min(1, "Group ID is required"),
+        permissions: z
+          .array(
+            z.enum(['view', 'download', 'upload', 'delete', 'share'])
+          )
+          .min(1, "At least one permission is required"),
+      })
+    )
+    .optional()
+    .default([]),
+}).refine(
+  (data) => data.users.length > 0 || data.groups.length > 0,
+  {
+    message: "At least one user or group must be specified",
+  }
+);

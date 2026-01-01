@@ -1,0 +1,214 @@
+async function buildBreadcrumbs(parent, parentType, user) {
+  const breadcrumbs = [];
+
+  // ============================================
+  // CASE 1: Parent is a DEPARTMENT
+  // ============================================
+  if (parentType === "DEPARTMENT") {
+    // ✅ Use the imported function (no await import needed)
+    const isOwner = hasImplicitAccess(user, parent);
+    
+    if (!isOwner) {
+      // 🎯 User is viewing a SHARED department
+      return [
+        {
+          id: "shared-root",
+          name: "Shared with me",
+          type: "virtual",
+          isShared: true,
+        },
+        {
+          id: parent._id.toString(),
+          name: parent.name,
+          type: "department",
+          isShared: true,
+        }
+      ];
+    }
+    
+    // ✅ Owner sees normal department breadcrumb
+    breadcrumbs.push({
+      id: parent._id.toString(),
+      name: parent.name,
+      type: "department",
+      ownerType: parent.ownerType,
+      isShared: false,
+    });
+    
+    return breadcrumbs;
+  }
+
+  // ============================================
+  // CASE 2: Parent is a FOLDER
+  // ============================================
+  if (parentType === "FOLDER") {
+    // ✅ Use the imported function (no await import needed)
+    const isOwner = await isOwnerOfFolder(parent, user);
+    
+    if (!isOwner) {
+      // 🎯 User is viewing a SHARED folder
+      return [
+        {
+          id: "shared-root",
+          name: "Shared with me",
+          type: "virtual",
+          isShared: true,
+        },
+        {
+          id: parent._id.toString(),
+          name: parent.name,
+          type: "folder",
+          isShared: true,
+        }
+      ];
+    }
+    
+    // ✅ Owner sees FULL PATH - build it normally
+    return await buildRealPathBreadcrumbs(parent);
+  }
+
+  return breadcrumbs;
+}
+
+/**
+ * Build breadcrumbs - shows real path for owners, virtual path for shared users
+ * @param {Object} parent - Parent folder or department
+ * @param {string} parentType - 'FOLDER' | 'DEPARTMENT'
+ * @param {Object} user - Current user
+ * @returns {Promise<Array>} Breadcrumbs array
+ */
+async function buildBreadcrumbs(parent, parentType, user) {
+  const breadcrumbs = [];
+
+  // ============================================
+  // CASE 1: Parent is a DEPARTMENT
+  // ============================================
+  if (parentType === "DEPARTMENT") {
+    // Import the helper function at the top of file if not already
+    const { hasImplicitAccess } = await import("../helpers/aclHelpers.js");
+    
+    const isOwner = hasImplicitAccess(user, parent);
+    
+    if (!isOwner) {
+      // 🎯 User is viewing a SHARED department
+      return [
+        {
+          id: "shared-root",
+          name: "Shared with me",
+          type: "virtual",
+          isShared: true,
+        },
+        {
+          id: parent._id.toString(),
+          name: parent.name,
+          type: "department",
+          isShared: true,
+        }
+      ];
+    }
+    
+    // ✅ Owner sees normal department breadcrumb
+    breadcrumbs.push({
+      id: parent._id.toString(),
+      name: parent.name,
+      type: "department",
+      ownerType: parent.ownerType,
+      isShared: false,
+    });
+    
+    return breadcrumbs;
+  }
+
+  // ============================================
+  // CASE 2: Parent is a FOLDER
+  // ============================================
+  if (parentType === "FOLDER") {
+    // Import the helper function
+    const { isOwnerOfFolder } = await import("../helpers/aclHelpers.js");
+    
+    const isOwner = await isOwnerOfFolder(parent, user);
+    
+    if (!isOwner) {
+      // 🎯 User is viewing a SHARED folder
+      return [
+        {
+          id: "shared-root",
+          name: "Shared with me",
+          type: "virtual",
+          isShared: true,
+        },
+        {
+          id: parent._id.toString(),
+          name: parent.name,
+          type: "folder",
+          isShared: true,
+        }
+      ];
+    }
+    
+    // ✅ Owner sees FULL PATH - build it normally
+    return await buildRealPathBreadcrumbs(parent);
+  }
+
+  return breadcrumbs;
+}
+
+/**
+ * Build full breadcrumb path for owners
+ * (This is your existing logic, just extracted)
+ */
+async function buildRealPathBreadcrumbs(parent) {
+  const breadcrumbs = [];
+  const pathParts = parent.path.split("/").filter((p) => p.length > 0);
+  
+  if (pathParts.length === 0) return breadcrumbs;
+
+  // Get department
+  const department = await DepartmentModel.findOne({
+    name: pathParts[0],
+    isActive: true,
+  });
+
+  if (department) {
+    breadcrumbs.push({
+      id: department._id.toString(),
+      name: department.name,
+      type: "department",
+      ownerType: department.ownerType,
+      isShared: false,
+    });
+  }
+
+  // Build folder paths
+  const folderPaths = [];
+  let currentPath = `/${pathParts[0]}`;
+  for (let i = 1; i < pathParts.length; i++) {
+    currentPath += `/${pathParts[i]}`;
+    folderPaths.push(currentPath);
+  }
+
+  // Fetch all folders in one query
+  if (folderPaths.length > 0) {
+    const folders = await FolderModel.find({
+      path: { $in: folderPaths },
+      isDeleted: false,
+    }).lean();
+
+    const folderMap = new Map();
+    folders.forEach((f) => folderMap.set(f.path, f));
+
+    folderPaths.forEach((path) => {
+      const folder = folderMap.get(path);
+      if (folder) {
+        breadcrumbs.push({
+          id: folder._id.toString(),
+          name: folder.name,
+          type: "folder",
+          isShared: false,
+        });
+      }
+    });
+  }
+
+  return breadcrumbs;
+}

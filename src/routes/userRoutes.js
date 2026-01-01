@@ -23,7 +23,7 @@ import {
   resendOtp,
   resetPassword,
   verifyOtp,
-  createUserBySuperAdmin,
+ 
 } from "../controller/authController.js";
 import { authenticateUser } from "../middleware/authMiddleware.js";
 
@@ -32,11 +32,7 @@ const router = express.Router();
 // Register new user
 router.post("/register", registerUser);
 
-router.post(
-  "/users",
-  authenticateUser,
-  createUserBySuperAdmin
-);
+
 
 router.post("/verify-otp", verifyOtp);
 

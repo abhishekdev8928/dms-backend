@@ -5,7 +5,6 @@ const departmentSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Department name is required'],
     trim: true,
-    unique: true,
     maxlength: [100, 'Department name cannot exceed 100 characters']
   },
   description: {
@@ -14,10 +13,36 @@ const departmentSchema = new mongoose.Schema({
     maxlength: [500, 'Description cannot exceed 500 characters']
   },
   
-  // Parent-child hierarchy fields
-  parent_id: {
+  // 🔥 NEW: Flag to differentiate Org vs User department
+  ownerType: {
+    type: String,
+    enum: ['ORG', 'USER'],
+    required: [true, 'Owner type is required'],
+    uppercase: true,
+    immutable: true // Cannot be changed after creation
+  },
+  
+  // 🔥 NEW: For USER type departments (MyDrive), store the user ID
+  ownerId: {
     type: mongoose.Schema.Types.ObjectId,
-    default: null  // Just a mongoose ID - can reference anything
+    ref: 'User',
+    default: null,
+    // Validate: if ownerType is USER, ownerId must exist
+    validate: {
+      validator: function(value) {
+        if (this.ownerType === 'USER') {
+          return value != null;
+        }
+        return true;
+      },
+      message: 'ownerId is required when ownerType is USER'
+    }
+  },
+  
+  // Parent-child hierarchy fields
+  parentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    default: null
   },
   type: {
     type: String,
@@ -69,12 +94,23 @@ const departmentSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Indexes for performance
+// 🔥 UPDATED: Indexes for performance
 departmentSchema.index({ name: 1 });
 departmentSchema.index({ isActive: 1 });
 departmentSchema.index({ createdAt: -1 });
-departmentSchema.index({ parent_id: 1 });
+departmentSchema.index({ parentId: 1 });
 departmentSchema.index({ path: 1 });
+departmentSchema.index({ ownerType: 1 });
+departmentSchema.index({ ownerId: 1 });
+
+// 🔥 NEW: Compound unique index - each user can only have ONE USER-type department
+departmentSchema.index(
+  { ownerType: 1, ownerId: 1 },
+  { 
+    unique: true,
+    partialFilterExpression: { ownerType: 'USER' }
+  }
+);
 
 // Virtual for formatted storage size
 departmentSchema.virtual('stats.totalStorageFormatted').get(function() {
@@ -86,6 +122,16 @@ departmentSchema.virtual('stats.totalStorageFormatted').get(function() {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   
   return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+});
+
+// 🔥 NEW: Virtual to check if this is a MyDrive department
+departmentSchema.virtual('isMyDrive').get(function() {
+  return this.ownerType === 'USER';
+});
+
+// 🔥 NEW: Virtual to check if this is an Org department
+departmentSchema.virtual('isOrgDepartment').get(function() {
+  return this.ownerType === 'ORG';
 });
 
 // Methods
@@ -204,6 +250,43 @@ departmentSchema.statics.getByName = function(name) {
   return this.findOne({ name: new RegExp(`^${name}$`, 'i') });
 };
 
+// 🔥 NEW: Get user's MyDrive department
+departmentSchema.statics.getUserMyDrive = function(userId) {
+  return this.findOne({ 
+    ownerType: 'USER', 
+    ownerId: userId,
+    isActive: true 
+  });
+};
+
+// 🔥 NEW: Get all organizational departments (not MyDrive)
+departmentSchema.statics.getOrgDepartments = function() {
+  return this.find({ 
+    ownerType: 'ORG',
+    isActive: true 
+  }).sort({ name: 1 });
+};
+
+// 🔥 NEW: Create MyDrive for a user
+departmentSchema.statics.createMyDrive = async function(userId, creatorId) {
+  // Check if MyDrive already exists for this user
+  const existing = await this.getUserMyDrive(userId);
+  if (existing) {
+    throw new Error('MyDrive already exists for this user');
+  }
+  
+  const myDrive = await this.create({
+    name: `MyDrive_${userId}`, // Unique name per user
+    description: 'Personal drive for user',
+    ownerType: 'USER',
+    ownerId: userId,
+    createdBy: creatorId || userId,
+    isActive: true
+  });
+  
+  return myDrive;
+};
+
 // Pre-save middleware
 departmentSchema.pre('save', async function(next) {
   if (this.isModified('name')) {
@@ -219,8 +302,18 @@ departmentSchema.pre('save', async function(next) {
     this.buildPath();
   }
   
-  // Ensure parent_id is null for departments (they are root level)
-  this.parent_id = null;
+  // Ensure parentId is null for departments (they are root level)
+  this.parentId = null;
+  
+  // 🔥 NEW: Validate ownerType and ownerId relationship
+  if (this.ownerType === 'USER' && !this.ownerId) {
+    return next(new Error('ownerId is required when ownerType is USER'));
+  }
+  
+  if (this.ownerType === 'ORG' && this.ownerId) {
+    // Clear ownerId for ORG departments
+    this.ownerId = null;
+  }
   
   next();
 });

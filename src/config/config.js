@@ -6,23 +6,27 @@ conf({
       : "./.env.development",
 });
 
-console.log(process.env.MONGO_DB_URL)
-
 const _config = {
   port: process.env.PORT || 3200,
   env: process.env.NODE_ENV,
   databaseUrl: process.env.MONGO_DB_URL,
 
-  jwtSecret:process.env.JWT_SECRET,
-  jwtExpiry:process.env.JWT_EXPIRES_IN,
+  jwtSecret: process.env.JWT_SECRET,
+  jwtExpiry: process.env.JWT_EXPIRES_IN,
 
-  jwtRefreshSecret:process.env.JWT_REFRESH_SECRET,
-  jwtRefreshExpiry:process.env.JWT_REFRESH_EXPIRY='12d',
+  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET,
+  jwtRefreshExpiry: process.env.JWT_REFRESH_EXPIRY || '12d',
 
-  frontendUrl:process.env.FRONTEND_URL,
+  frontendUrl: process.env.FRONTEND_URL,
+
+  maxFileSize: process.env.MAX_FILE_SIZE,
+
   
-
-  maxFileSize:process.env.MAX_FILE_SIZE,
+  chunkedUpload: {
+    threshold: parseInt(process.env.CHUNK_SIZE_THRESHOLD) || 100 * 1024 * 1024, // 100MB default
+    minChunkSize: parseInt(process.env.MIN_CHUNK_SIZE) || 5 * 1024 * 1024, // 5MB default
+    maxChunkSize: parseInt(process.env.MAX_CHUNK_SIZE) || 100 * 1024 * 1024, // 100MB default
+  },
 
   aws: {
     accessKeyId: process.env.USER_ACCESS_KEY,

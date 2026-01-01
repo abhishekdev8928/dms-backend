@@ -4,7 +4,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import commonRoutes from "./routes/commonRoutes.js";
 import activityRoutes from './routes/activityRoutes.js';
-
+import userManagementRoutes from './routes/userManagementRoutes.js'
 
 const app = express();
 
@@ -20,7 +20,7 @@ import restoreRoutes from "./routes/restoreRoutes.js"
 import { bulkSoftDelete } from "./controller/commonController.js";
 import { authenticateUser } from "./middleware/authMiddleware.js";
 import starredRoutes from "./routes/starredRoutes.js"
-
+import ShareRoutes from "./routes/shareRoutes.js"
 
 app.use(helmet({
   contentSecurityPolicy: {
@@ -141,11 +141,12 @@ app.use("/api/folders" , folderRoutes);
 
 app.use("/api/documents" , documentRoutes);
 
-app.use("/api/children",treeRoutes);
+app.use("/api/dms",treeRoutes);
 
 app.use("/api/trash" , restoreRoutes)
 app.use('/api/activity', activityRoutes);
 
+app.use('/api/admin/users' , userManagementRoutes)
 
 app.use("/api/starred" , starredRoutes);
 app.use("/api/common", commonRoutes);
@@ -154,7 +155,7 @@ app.use("/api/common", commonRoutes);
 app.use("/api/search",searchRoutes)
 
 
-
+app.use("/api/share",ShareRoutes)
 
 
 

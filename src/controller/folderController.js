@@ -1,112 +1,117 @@
-/** 
- * FOLDER CONTROLLERS - Complete Activity Logging Implementation
- * ✅ All folder activities logged using new Activity Model static methods
- * ✅ Proper userInfo object passed (name, email, avatar)
- */
-import createHttpError from 'http-errors';
-import mongoose from 'mongoose';
-import FolderModel from '../models/folderModel.js';
-import DepartmentModel from '../models/departmentModel.js';
-import ActivityLog from '../models/activityModel.js';
-import { 
-  sanitizeInputWithXSS, 
+// controllers/folderController.js
+
+import createHttpError from "http-errors";
+import mongoose from "mongoose";
+import FolderModel from "../models/folderModel.js";
+import DepartmentModel from "../models/departmentModel.js";
+import DocumentModel from "../models/documentModel.js";
+import ActivityLog from "../models/activityModel.js";
+import AccessControlModel from "../models/accessControlModel.js";
+import { formatBytes, getUserInfo } from "../utils/helper/folderHelper.js";
+import {
+  hasPermission,
+  attachActions,
+  attachActionsBulk,
+  hasImplicitAccess, isOwnerOfFolder 
+ 
+} from "../utils/helper/aclHelpers.js";
+import {
+  sanitizeInputWithXSS,
   sanitizeAndValidateId,
-  validateRequest 
-} from '../utils/helper.js';
+  validateRequest,
+} from "../utils/helper.js";
 import {
   createFolderSchema,
-  getRootFoldersSchema,
-  getRootFoldersQuerySchema,
   getFolderByIdSchema,
   getChildFoldersQuerySchema,
-  getAllDescendantsQuerySchema,
   updateFolderSchema,
   moveFolderSchema,
   searchFoldersSchema,
-  getFolderByPathSchema
-} from '../validation/folderValidation.js';
-import DocumentModel from '../models/documentModel.js';
+  shareFolderSchema,
+} from "../validation/folderValidation.js";
+import StarredModel from "../models/starredModel.js";
 
 /**
- * Helper function to get user info for activity logging
- */
-const getUserInfo = (user) => ({
-  name: user.name || user.username || 'Unknown User',
-  email: user.email || '',
-  avatar: user.avatar || user.profilePicture || null
-});
-
-/**
- * ✅ ACTIVITY LOGGED: Create a new folder
- * Route: POST /api/folders
- * Activity: FOLDER_CREATED
+ * @route   POST /api/folders
+ * @desc    Create a new folder inside parent
+ * @access  Private - Requires 'upload' permission on parent
  */
 export const createFolder = async (req, res, next) => {
   try {
-    const parsedData = createFolderSchema.safeParse(req.body);
-    validateRequest(parsedData);
-
-    const { name, parent_id, description, color } = parsedData.data;
-    const createdBy = req.user.id;
+    const { name, parentId, description, color } = validateRequest(
+      createFolderSchema.safeParse(req.body)
+    );
 
     const sanitizedName = sanitizeInputWithXSS(name);
-    const sanitizedParentId = sanitizeAndValidateId(parent_id, 'Parent ID');
-    const sanitizedDescription = description ? sanitizeInputWithXSS(description) : undefined;
+    const sanitizedParentId = sanitizeAndValidateId(parentId, "Parent ID");
+    const sanitizedDescription = description
+      ? sanitizeInputWithXSS(description)
+      : undefined;
 
-    // Find parent (Department or Folder)
-    let parent = await DepartmentModel.findById(sanitizedParentId);
-    let parentType = 'Department';
-    
-    if (!parent) {
-      parent = await FolderModel.findById(sanitizedParentId);
-      parentType = 'Folder';
-    }
+    // Parent is already validated in middleware (canCreate)
+    const parent = req.parentResource;
+    const parentType = req.parentType;
 
-    if (!parent) {
-      throw createHttpError(404, 'Parent (Department or Folder) not found');
+    // Get departmentId
+    let departmentId;
+    if (parentType === "DEPARTMENT") {
+      departmentId = parent._id;
+    } else {
+      departmentId = parent.departmentId;
     }
 
     // Generate unique folder name if duplicate exists
     let uniqueFolderName = sanitizedName;
     let counter = 1;
     let existingFolder = await FolderModel.findOne({
-      parent_id: sanitizedParentId,
-      name: { $regex: new RegExp(`^${sanitizedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      parentId: sanitizedParentId,
+      name: {
+        $regex: new RegExp(
+          `^${sanitizedName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          "i"
+        ),
+      },
     });
 
     while (existingFolder) {
       uniqueFolderName = `${sanitizedName} (${counter})`;
       existingFolder = await FolderModel.findOne({
-        parent_id: sanitizedParentId,
-        name: { $regex: new RegExp(`^${uniqueFolderName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+        parentId: sanitizedParentId,
+        name: {
+          $regex: new RegExp(
+            `^${uniqueFolderName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+            "i"
+          ),
+        },
       });
       counter++;
     }
 
-    // Create the folder
+    // Create folder
     const folder = await FolderModel.create({
       name: uniqueFolderName,
-      parent_id: sanitizedParentId,
+      parentId: sanitizedParentId,
+      departmentId,
       description: sanitizedDescription,
-      color: color || '#3B82F6',
-      createdBy
+      color: color || "#3B82F6",
+      createdBy: req.user.id,
     });
 
-    // ✅ ACTIVITY LOG: FOLDER_CREATED
-    const userInfo = getUserInfo(req.user);
+    // Log activity
     await ActivityLog.logFolderCreate(
-      createdBy,
+      req.user.id,
       folder,
       sanitizedParentId,
-      userInfo
+      getUserInfo(req.user)
     );
 
     res.status(201).json({
       success: true,
-      message: uniqueFolderName !== sanitizedName 
-        ? `Folder created successfully as "${uniqueFolderName}" (original name was already in use)`
-        : 'Folder created successfully',
-      data: folder
+      message:
+        uniqueFolderName !== sanitizedName
+          ? `Folder created as "${uniqueFolderName}" (name was taken)`
+          : "Folder created successfully",
+      data: folder,
     });
   } catch (error) {
     next(error);
@@ -114,582 +119,159 @@ export const createFolder = async (req, res, next) => {
 };
 
 /**
- * Get all root folders of a department
- */
-export const getRootFolders = async (req, res, next) => {
-  try {
-    const paramsData = getRootFoldersSchema.safeParse(req.params);
-    validateRequest(paramsData);
-
-    const queryData = getRootFoldersQuerySchema.safeParse(req.query);
-    validateRequest(queryData);
-
-    const { departmentId } = paramsData.data;
-    const { includeDeleted } = queryData.data;
-
-    const sanitizedDeptId = sanitizeAndValidateId(departmentId, 'Department ID');
-
-    const department = await DepartmentModel.findById(sanitizedDeptId);
-    if (!department) {
-      throw createHttpError(404, 'Department not found');
-    }
-
-    const folders = await FolderModel.getRootFoldersForDepartment(
-      sanitizedDeptId,
-      includeDeleted === 'true'
-    );
-
-    res.status(200).json({
-      success: true,
-      count: folders.length,
-      data: folders
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Get folder by ID
+ * @route   GET /api/folders/:id
+ * @desc    Get folder by ID with details
+ * @access  Private - Requires 'view' permission
  */
 export const getFolderById = async (req, res, next) => {
   try {
-    const parsedData = getFolderByIdSchema.safeParse(req.params);
-    validateRequest(parsedData);
+    const { id } = validateRequest(getFolderByIdSchema.safeParse(req.params));
 
-    const { id } = parsedData.data;
-    const sanitizedId = sanitizeAndValidateId(id, 'Folder ID');
-
-    const folder = await FolderModel.findById(sanitizedId)
-      .populate('parent_id', 'name path')
-      .populate('createdBy', 'name email')
-      .populate('updatedBy', 'name email');
-
-    if (!folder) {
-      throw createHttpError(404, 'Folder not found');
-    }
+    // Folder is already validated and attached by middleware (canView)
+    const folder = req.resource;
 
     const department = await folder.getDepartment();
     const breadcrumbs = folder.getBreadcrumbs();
 
+    // Attach actions for frontend
+    const folderWithActions = await attachActions(
+      folder.toObject(),
+      req.user,
+      "FOLDER"
+    );
+
     res.status(200).json({
       success: true,
       data: {
-        ...folder.toObject(),
-        department: department ? { _id: department._id, name: department.name } : null,
-        breadcrumbs
-      }
+        ...folderWithActions,
+        department: department
+          ? {
+              _id: department._id,
+              name: department.name,
+              ownerType: department.ownerType,
+            }
+          : null,
+        breadcrumbs,
+      },
     });
   } catch (error) {
     next(error);
   }
 };
 
+
+
 /**
- * Get child folders/files with breadcrumbs
+ * @route   GET /api/folders/:id/children
+ * @desc    Get direct child folders and documents
+ * @access  Private - Requires 'view' permission on parent
  */
 export const getChildFolders = async (req, res, next) => {
   try {
-    const paramsData = getFolderByIdSchema.safeParse(req.params);
-    validateRequest(paramsData);
+    const { id } = validateRequest(getFolderByIdSchema.safeParse(req.params));
+    const { includeDeleted, type, userEmail } = validateRequest(
+      getChildFoldersQuerySchema.safeParse(req.query)
+    );
 
-    const queryData = getChildFoldersQuerySchema.safeParse(req.query);
-    validateRequest(queryData);
+    const parent = req.parentResource;
+    const parentType = req.parentType;
 
-    const { id } = paramsData.data;
-    const { includeDeleted, type, userEmail } = queryData.data;
+    // ✅ FIX: Pass req.user to buildBreadcrumbs
+    const breadcrumbs = await buildBreadcrumbs(parent, parentType, req.user);
 
-    const sanitizedId = sanitizeAndValidateId(id, "Parent ID");
+    let children = [];
 
-    let parent;
-    let parentType;
-    
-    parent = await FolderModel.findById(sanitizedId);
-    
-    if (parent) {
-      parentType = "folder";
+    if (parentType === "FOLDER") {
+      // 🔥 ENSURE getChildren RETURNS LEAN DATA
+      children = await parent.getChildren(includeDeleted === "true", {
+        lean: true,
+      });
     } else {
-      parent = await DepartmentModel.findById(sanitizedId);
-      
-      if (parent) {
-        parentType = "department";
-      } else {
-        throw createHttpError(404, "Parent folder or department not found");
-      }
-    }
+      const query = {
+        parentId: parent._id,
+        ...(includeDeleted !== "true" && { isDeleted: false }),
+      };
 
-    // 🔥 BUILD BREADCRUMBS
-    const breadcrumbs = await buildBreadcrumbs(parent, parentType);
+      const [folders, documents] = await Promise.all([
+        FolderModel.find(query)
+          .populate("createdBy", "email username")
+          .populate("updatedBy", "email username")
+          .sort({ createdAt: -1 })
+          .lean(), // ✅ KEY FIX
 
-    let children;
-    let mode = "direct";
-
-    const hasFilters = type || userEmail;
-
-    if (hasFilters) {
-      children = await getAllNestedChildren(
-        sanitizedId,
-        includeDeleted === "true"
-      );
-      mode = "nested";
-    } else {
-      if (parentType === "folder") {
-        children = await parent.getChildren(includeDeleted === "true");
-      } else {
-        const query = { 
-          parent_id: sanitizedId,
-          ...(includeDeleted === "true" ? {} : { isDeleted: false })
-        };
-
-        const folders = await FolderModel.find(query).sort({ createdAt: -1 });
-        const documents = await DocumentModel.find(query).sort({ createdAt: -1 });
-
-        children = [...folders, ...documents];
-      }
-      
-      await FolderModel.populate(children, [
-        { path: 'createdBy', select: 'email username' },
-        { path: 'updatedBy', select: 'email username' }
+        DocumentModel.find(query)
+          .populate("createdBy", "email username")
+          .populate("updatedBy", "email username")
+          .sort({ createdAt: -1 })
+          .lean(), // ✅ KEY FIX
       ]);
+
+      children = [...folders, ...documents];
     }
 
+    // 🔍 Apply filters
     let filteredChildren = children;
 
     if (type) {
-      const typeFilter = type.toLowerCase();
       filteredChildren = filteredChildren.filter(
-        (child) => child.type && child.type.toLowerCase() === typeFilter
+        (child) => child.type && child.type.toLowerCase() === type.toLowerCase()
       );
     }
 
     if (userEmail) {
       const emailLower = userEmail.trim().toLowerCase();
       filteredChildren = filteredChildren.filter((child) => {
-        const createdByEmail = child.createdBy?.email;
-        const updatedByEmail = child.updatedBy?.email;
-        const directEmail = child.userEmail;
-        
-        const matchedEmail = createdByEmail || updatedByEmail || directEmail;
-        return matchedEmail && matchedEmail.toLowerCase() === emailLower;
+        const email =
+          child.createdBy?.email || child.updatedBy?.email || child.userEmail;
+        return email && email.toLowerCase() === emailLower;
       });
     }
 
-    // Sort: folders first, then documents/files
+    // 📁 Sort: folders first, then by createdAt
     filteredChildren.sort((a, b) => {
-      const aIsFolder = a.constructor.modelName === 'Folder' || a.type === 'folder';
-      const bIsFolder = b.constructor.modelName === 'Folder' || b.type === 'folder';
-      
+      const aIsFolder = a.type === "folder";
+      const bIsFolder = b.type === "folder";
+
       if (aIsFolder && !bIsFolder) return -1;
       if (!aIsFolder && bIsFolder) return 1;
-      
+
       return new Date(b.createdAt) - new Date(a.createdAt);
     });
 
-    res.status(200).json({
-      success: true,
-      count: filteredChildren.length,
-      mode: mode,
-      parentType: parentType,
-      breadcrumbs: breadcrumbs, // 🔥 ADDED BREADCRUMBS
-      filters: {
-        type: type || null,
-        userEmail: userEmail || null,
-      },
-      children: filteredChildren,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
+    // ⭐ Get starred status for all items
+    const itemIds = filteredChildren.map(child => child._id);
+    const starredItems = await StarredModel.find({
+      userId: req.user._id,
+      itemId: { $in: itemIds }
+    }).lean();
 
-/**
- * 🔥 BREADCRUMB BUILDER FUNCTION
- * Builds breadcrumbs starting from department
- */
-async function buildBreadcrumbs(parent, parentType) {
-  const breadcrumbs = [];
+    // Create a Set of starred item IDs for O(1) lookup
+    const starredItemIds = new Set(
+      starredItems.map(item => item.itemId.toString())
+    );
 
-  if (parentType === "department") {
-    // If parent is department, just add it
-    breadcrumbs.push({
-      id: parent._id.toString(),
-      name: parent.name,
-      type: "department"
-    });
-  } else if (parentType === "folder") {
-    // For folders, parse the path to build the full breadcrumb trail
-    // Path format: /DepartmentName/Folder1/Folder2/CurrentFolder
-    const pathParts = parent.path.split('/').filter(part => part.length > 0);
-    
-    if (pathParts.length === 0) {
-      return breadcrumbs;
-    }
+    // Add isStarred field to each child
+    const childrenWithStarred = filteredChildren.map(child => ({
+      ...child,
+      isStarred: starredItemIds.has(child._id.toString())
+    }));
 
-    // First part is always the department
-    const departmentName = pathParts[0];
-    const department = await DepartmentModel.findOne({ name: departmentName });
-    
-    if (department) {
-      breadcrumbs.push({
-        id: department._id.toString(),
-        name: department.name,
-        type: "department"
-      });
-    }
-
-    // Now reconstruct each folder in the path
-    let currentPath = `/${departmentName}`;
-    
-    for (let i = 1; i < pathParts.length; i++) {
-      currentPath += `/${pathParts[i]}`;
-      
-      // Find folder by exact path match
-      const folder = await FolderModel.findOne({ 
-        path: currentPath,
-        isDeleted: false 
-      });
-      
-      if (folder) {
-        breadcrumbs.push({
-          id: folder._id.toString(),
-          name: folder.name,
-          type: "folder"
-        });
-      }
-    }
-  }
-
-  return breadcrumbs;
-}
-
-/**
- * ALTERNATIVE: Optimized version using single query
- * More efficient for deep hierarchies
- */
-async function buildBreadcrumbsOptimized(parent, parentType) {
-  const breadcrumbs = [];
-
-  if (parentType === "department") {
-    breadcrumbs.push({
-      id: parent._id.toString(),
-      name: parent.name,
-      type: "department"
-    });
-  } else if (parentType === "folder") {
-    const pathParts = parent.path.split('/').filter(part => part.length > 0);
-    
-    if (pathParts.length === 0) return breadcrumbs;
-
-    // Get department
-    const departmentName = pathParts[0];
-    const department = await DepartmentModel.findOne({ name: departmentName });
-    
-    if (department) {
-      breadcrumbs.push({
-        id: department._id.toString(),
-        name: department.name,
-        type: "department"
-      });
-    }
-
-    // Build all possible paths and fetch folders in one query
-    const folderPaths = [];
-    let currentPath = `/${departmentName}`;
-    
-    for (let i = 1; i < pathParts.length; i++) {
-      currentPath += `/${pathParts[i]}`;
-      folderPaths.push(currentPath);
-    }
-
-    // Single query to get all folders in the path
-    if (folderPaths.length > 0) {
-      const folders = await FolderModel.find({
-        path: { $in: folderPaths },
-        isDeleted: false
-      }).lean();
-
-      // Create a map for quick lookup
-      const folderMap = new Map();
-      folders.forEach(f => folderMap.set(f.path, f));
-
-      // Add folders in correct order
-      folderPaths.forEach(path => {
-        const folder = folderMap.get(path);
-        if (folder) {
-          breadcrumbs.push({
-            id: folder._id.toString(),
-            name: folder.name,
-            type: "folder"
-          });
-        }
-      });
-    }
-  }
-
-  return breadcrumbs;
-}
-
-/**
- * Recursively get all nested children from a folder
- */
-async function getAllNestedChildren(folderId, includeDeleted = false) {
-  const allChildren = [];
-  const queue = [{ id: folderId, path: "", depth: 0 }];
-  const visited = new Set();
-
-  while (queue.length > 0) {
-    const { id, path, depth } = queue.shift();
-
-    if (visited.has(id)) {
-      continue;
-    }
-    visited.add(id);
-
-    let parent = await FolderModel.findById(id);
-    let children;
-    
-    if (parent) {
-      children = await parent.getChildren(includeDeleted);
-    } else {
-      parent = await DepartmentModel.findById(id);
-      if (!parent) {
-        continue;
-      }
-      
-      const query = { 
-        parent_id: id,
-        ...(includeDeleted ? {} : { isDeleted: false })
-      };
-      
-      const folders = await FolderModel.find(query).sort({ createdAt: -1 });
-      const documents = await DocumentModel.find(query).sort({ createdAt: -1 });
-      children = [...folders, ...documents];
-    }
-    
-    await FolderModel.populate(children, [
-      { path: 'createdBy', select: 'email username' },
-      { path: 'updatedBy', select: 'email username' }
-    ]);
-
-    for (const child of children) {
-      const childPath = path ? `${path}/${child.name}` : child.name;
-      const childDepth = path.split("/").filter(Boolean).length;
-
-      const childData = {
-        ...(child.toObject ? child.toObject() : child),
-        path: childPath,
-        parentPath: path,
-        depth: childDepth,
-        parentId: id,
-      };
-
-      allChildren.push(childData);
-
-      if (child.type === "folder" && child._id) {
-        queue.push({ 
-          id: child._id, 
-          path: childPath,
-          depth: depth + 1 
-        });
-      }
-    }
-  }
-
-  return allChildren;
-}
-
-/**
- * Get all descendants
- */
-export const getAllDescendants = async (req, res, next) => {
-  try {
-    const paramsData = getFolderByIdSchema.safeParse(req.params);
-    validateRequest(paramsData);
-
-    const queryData = getAllDescendantsQuerySchema.safeParse(req.query);
-    validateRequest(queryData);
-
-    const { id } = paramsData.data;
-    const { includeDeleted, type } = queryData.data;
-
-    const sanitizedId = sanitizeAndValidateId(id, 'Folder ID');
-
-    const folder = await FolderModel.findById(sanitizedId);
-
-    if (!folder) {
-      throw createHttpError(404, 'Folder not found');
-    }
-
-    let descendants = await folder.getAllDescendants(includeDeleted === 'true');
-
-    if (type) {
-      descendants = descendants.filter(desc => desc.type === type);
-    }
-
-    res.status(200).json({
-      success: true,
-      count: descendants.length,
-      data: descendants
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Get breadcrumbs
- */
-export const getFolderBreadcrumbs = async (req, res, next) => {
-  try {
-    const parsedData = getFolderByIdSchema.safeParse(req.params);
-    validateRequest(parsedData);
-
-    const { id } = parsedData.data;
-    const sanitizedId = sanitizeAndValidateId(id, 'Folder ID');
-
-    const folder = await FolderModel.findById(sanitizedId);
-
-    if (!folder) {
-      throw createHttpError(404, 'Folder not found');
-    }
-
-    const breadcrumbs = folder.getBreadcrumbs();
-
-    res.status(200).json({
-      success: true,
-      data: {
-        path: folder.path,
-        breadcrumbs
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * ✅ ACTIVITY LOGGED: Update folder with rename
- * Route: PUT /api/folders/:id
- * Activity: FOLDER_RENAMED (if name changes)
- */
-export const updateFolder = async (req, res, next) => {
-  try {
-    const paramsData = getFolderByIdSchema.safeParse(req.params);
-    validateRequest(paramsData);
-
-    const bodyData = updateFolderSchema.safeParse(req.body);
-    validateRequest(bodyData);
-
-    const { id } = paramsData.data;
-    const { name, description, color } = bodyData.data;
-    const updatedBy = req.user.id;
-
-    const sanitizedId = sanitizeAndValidateId(id, 'Folder ID');
-
-    const oldFolder = await FolderModel.findById(sanitizedId);
-
-    if (!oldFolder) {
-      throw createHttpError(404, 'Folder not found');
-    }
-
-    const oldName = oldFolder.name;
-    let hasChanges = false;
-
-    // Handle name change with activity logging
-    if (name && name !== oldFolder.name) {
-      const sanitizedName = sanitizeInputWithXSS(name);
-      
-      const oldPath = oldFolder.path;
-      oldFolder.name = sanitizedName;
-      await oldFolder.buildPath();
-      const newPath = oldFolder.path;
-      
-      await oldFolder.updateDescendantsPaths(oldPath, newPath);
-      
-      // ✅ ACTIVITY LOG: FOLDER_RENAMED
-      const userInfo = getUserInfo(req.user);
-      await ActivityLog.logFolderRename(
-        updatedBy,
-        oldFolder,
-        oldName,
-        sanitizedName,
-        userInfo
-      );
-      
-      hasChanges = true;
-    }
-    
-    if (description !== undefined && description !== oldFolder.description) {
-      const sanitizedDesc = sanitizeInputWithXSS(description);
-      oldFolder.description = sanitizedDesc;
-      hasChanges = true;
-    }
-    
-    if (color && color !== oldFolder.color) {
-      oldFolder.color = color;
-      hasChanges = true;
-    }
-
-    if (hasChanges) {
-      oldFolder.updatedBy = updatedBy;
-      await oldFolder.save();
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'Folder updated successfully',
-      data: oldFolder
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * ✅ ACTIVITY LOGGED: Move folder
- * Route: PUT /api/folders/:id/move
- * Activity: FOLDER_MOVED
- */
-export const moveFolder = async (req, res, next) => {
-  try {
-    const paramsData = getFolderByIdSchema.safeParse(req.params);
-    validateRequest(paramsData);
-
-    const bodyData = moveFolderSchema.safeParse(req.body);
-    validateRequest(bodyData);
-
-    const { id } = paramsData.data;
-    const { newParentId } = bodyData.data;
-    const userId = req.user.id;
-
-    const sanitizedId = sanitizeAndValidateId(id, 'Folder ID');
-    const sanitizedParentId = sanitizeAndValidateId(newParentId, 'New Parent ID');
-
-    const folder = await FolderModel.findById(sanitizedId);
-
-    if (!folder) {
-      throw createHttpError(404, 'Folder not found');
-    }
-
-    const oldParentId = folder.parent_id;
-
-    // Move the folder
-    await folder.moveTo(sanitizedParentId);
-
-    // ✅ ACTIVITY LOG: FOLDER_MOVED
-    const userInfo = getUserInfo(req.user);
-    await ActivityLog.logFolderMove(
-      userId,
-      folder,
-      oldParentId,
-      sanitizedParentId,
-      userInfo
+    // 🔐 Attach actions AFTER lean conversion
+    const childrenWithActions = await attachActionsBulk(
+      childrenWithStarred,
+      req.user
     );
 
     res.status(200).json({
       success: true,
-      message: 'Folder moved successfully',
-      data: folder
+      count: childrenWithActions.length,
+      parentType,
+      breadcrumbs, // ✅ Now includes correct breadcrumbs with isShared flags
+      filters: {
+        type: type || null,
+        userEmail: userEmail || null,
+      },
+      children: childrenWithActions,
     });
   } catch (error) {
     next(error);
@@ -697,39 +279,412 @@ export const moveFolder = async (req, res, next) => {
 };
 
 /**
- * ✅ ACTIVITY LOGGED: Soft delete folder
- * Route: DELETE /api/folders/:id
- * Activity: FOLDER_DELETED
+ * Build breadcrumbs - shows real path for owners, virtual path for shared users
+ * @param {Object} parent - Parent folder or department
+ * @param {string} parentType - 'FOLDER' | 'DEPARTMENT'
+ * @param {Object} user - Current user
+ * @returns {Promise<Array>} Breadcrumbs array
+ */
+async function buildBreadcrumbs(parent, parentType, user) {
+  const breadcrumbs = [];
+
+  // ============================================
+  // CASE 1: Parent is a DEPARTMENT
+  // ============================================
+  if (parentType === "DEPARTMENT") {
+    const isOwner = hasImplicitAccess(user, parent);
+    
+    if (!isOwner) {
+      // 🎯 User is viewing a SHARED department
+      return [
+        {
+          id: "shared-root",
+          name: "Shared with me",
+          type: "virtual",
+          isShared: true,
+        },
+        {
+          id: parent._id.toString(),
+          name: parent.name,
+          type: "department",
+          isShared: true,
+        }
+      ];
+    }
+    
+    // ✅ Owner sees normal department breadcrumb
+    breadcrumbs.push({
+      id: parent._id.toString(),
+      name: parent.name,
+      type: "department",
+      ownerType: parent.ownerType,
+      isShared: false,
+    });
+    
+    return breadcrumbs;
+  }
+
+  // ============================================
+  // CASE 2: Parent is a FOLDER
+  // ============================================
+  if (parentType === "FOLDER") {
+    const isOwner = await isOwnerOfFolder(parent, user);
+    
+    if (!isOwner) {
+      // 🎯 User is viewing a SHARED folder
+      return [
+        {
+          id: "shared-root",
+          name: "Shared with me",
+          type: "virtual",
+          isShared: true,
+        },
+        {
+          id: parent._id.toString(),
+          name: parent.name,
+          type: "folder",
+          isShared: true,
+        }
+      ];
+    }
+    
+    // ✅ Owner sees FULL PATH - build it normally
+    return await buildRealPathBreadcrumbs(parent);
+  }
+
+  return breadcrumbs;
+}
+
+/**
+ * Build full breadcrumb path for owners
+ * (This is your existing logic, just extracted)
+ */
+async function buildRealPathBreadcrumbs(parent) {
+  const breadcrumbs = [];
+  const pathParts = parent.path.split("/").filter((p) => p.length > 0);
+  
+  if (pathParts.length === 0) return breadcrumbs;
+
+  // Get department
+  const department = await DepartmentModel.findOne({
+    name: pathParts[0],
+    isActive: true,
+  });
+
+  if (department) {
+    breadcrumbs.push({
+      id: department._id.toString(),
+      name: department.name,
+      type: "department",
+      ownerType: department.ownerType,
+      isShared: false,
+    });
+  }
+
+  // Build folder paths
+  const folderPaths = [];
+  let currentPath = `/${pathParts[0]}`;
+  for (let i = 1; i < pathParts.length; i++) {
+    currentPath += `/${pathParts[i]}`;
+    folderPaths.push(currentPath);
+  }
+
+  // Fetch all folders in one query
+  if (folderPaths.length > 0) {
+    const folders = await FolderModel.find({
+      path: { $in: folderPaths },
+      isDeleted: false,
+    }).lean();
+
+    const folderMap = new Map();
+    folders.forEach((f) => folderMap.set(f.path, f));
+
+    folderPaths.forEach((path) => {
+      const folder = folderMap.get(path);
+      if (folder) {
+        breadcrumbs.push({
+          id: folder._id.toString(),
+          name: folder.name,
+          type: "folder",
+          isShared: false,
+        });
+      }
+    });
+  }
+
+  return breadcrumbs;
+}
+
+/**
+ * Build breadcrumbs for folder or department
+ */
+// async function buildBreadcrumbs(parent, parentType) {
+//   const breadcrumbs = [];
+
+//   if (parentType === "DEPARTMENT") {
+//     breadcrumbs.push({
+//       id: parent._id.toString(),
+//       name: parent.name,
+//       type: "department",
+//       ownerType: parent.ownerType,
+//     });
+//   } else if (parentType === "FOLDER") {
+//     const pathParts = parent.path.split("/").filter((p) => p.length > 0);
+//     if (pathParts.length === 0) return breadcrumbs;
+
+//     // Get department
+//     const department = await DepartmentModel.findOne({
+//       name: pathParts[0],
+//       isActive: true,
+//     });
+
+//     if (department) {
+//       breadcrumbs.push({
+//         id: department._id.toString(),
+//         name: department.name,
+//         type: "department",
+//         ownerType: department.ownerType,
+//       });
+//     }
+
+//     // Build folder paths
+//     const folderPaths = [];
+//     let currentPath = `/${pathParts[0]}`;
+//     for (let i = 1; i < pathParts.length; i++) {
+//       currentPath += `/${pathParts[i]}`;
+//       folderPaths.push(currentPath);
+//     }
+
+//     // Fetch all folders in one query
+//     if (folderPaths.length > 0) {
+//       const folders = await FolderModel.find({
+//         path: { $in: folderPaths },
+//         isDeleted: false,
+//       }).lean();
+
+//       const folderMap = new Map();
+//       folders.forEach((f) => folderMap.set(f.path, f));
+
+//       folderPaths.forEach((path) => {
+//         const folder = folderMap.get(path);
+//         if (folder) {
+//           breadcrumbs.push({
+//             id: folder._id.toString(),
+//             name: folder.name,
+//             type: "folder",
+//           });
+//         }
+//       });
+//     }
+//   }
+
+//   return breadcrumbs;
+// }
+
+
+
+
+/**
+ * @route   GET /api/folders/:id/breadcrumbs
+ * @desc    Get breadcrumbs for folder
+ * @access  Private - Requires 'view' permission
+ */
+// export const getFolderBreadcrumbs = async (req, res, next) => {
+//   try {
+//     const { id } = validateRequest(getFolderByIdSchema.safeParse(req.params));
+
+//     // Folder is already validated by middleware
+//     const folder = req.resource;
+//     const breadcrumbs = folder.getBreadcrumbs();
+
+//     res.status(200).json({
+//       success: true,
+//       data: {
+//         path: folder.path,
+//         breadcrumbs,
+//       },
+//     });
+//   } catch (error) {
+//     next(error);
+//   }
+// };
+
+/**
+ * @route   PUT /api/folders/:id
+ * @desc    Update folder details
+ * @access  Private - Requires 'upload' permission
+ */
+export const updateFolder = async (req, res, next) => {
+  try {
+    const { id } = validateRequest(getFolderByIdSchema.safeParse(req.params));
+    const { name, description, color } = validateRequest(
+      updateFolderSchema.safeParse(req.body)
+    );
+
+    // Folder is already validated by middleware
+    const folder = req.resource;
+    const oldName = folder.name;
+    let hasChanges = false;
+
+    // Handle name change
+    if (name && name !== folder.name) {
+      const sanitizedName = sanitizeInputWithXSS(name);
+      const oldPath = folder.path;
+
+      folder.name = sanitizedName;
+      await folder.buildPath();
+      await folder.updateDescendantsPaths(oldPath, folder.path);
+
+      // Log rename
+      await ActivityLog.logFolderRename(
+        req.user.id,
+        folder,
+        oldName,
+        sanitizedName,
+        getUserInfo(req.user)
+      );
+      hasChanges = true;
+    }
+
+    // Handle description change
+    if (description !== undefined && description !== folder.description) {
+      folder.description = sanitizeInputWithXSS(description);
+      hasChanges = true;
+    }
+
+    // Handle color change
+    if (color && color !== folder.color) {
+      folder.color = color;
+      hasChanges = true;
+    }
+
+    if (hasChanges) {
+      folder.updatedBy = req.user.id;
+      await folder.save();
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Folder updated successfully",
+      data: folder,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @route   POST /api/folders/:id/move
+ * @desc    Move folder to new parent
+ * @access  Private - Requires 'delete' on source, 'upload' on destination
+ */
+export const moveFolder = async (req, res, next) => {
+  try {
+    const { id } = validateRequest(getFolderByIdSchema.safeParse(req.params));
+    const { newParentId } = validateRequest(
+      moveFolderSchema.safeParse(req.body)
+    );
+
+    const sanitizedParentId = sanitizeAndValidateId(
+      newParentId,
+      "New Parent ID"
+    );
+
+    // Folder is already validated by middleware (has delete permission)
+    const folder = req.resource;
+    const oldParentId = folder.parentId;
+
+    // Find new parent
+    let newParent = await FolderModel.findById(sanitizedParentId);
+    let newParentType = "FOLDER";
+
+    if (!newParent || newParent.isDeleted) {
+      newParent = await DepartmentModel.findById(sanitizedParentId);
+      newParentType = "DEPARTMENT";
+
+      if (!newParent || !newParent.isActive) {
+        throw createHttpError(404, "New parent not found");
+      }
+    }
+
+    // Check upload permission on destination
+    const userGroupIds = req.user.groups || [];
+    let canUpload = false;
+
+    if (newParentType === "FOLDER") {
+      canUpload = await hasPermission(
+        req.user,
+        newParent,
+        "FOLDER",
+        "upload",
+        userGroupIds
+      );
+    } else {
+      // For department, check implicit access
+      const { hasImplicitAccess } = await import(
+        "../utils/helper/aclHelpers.js"
+      );
+
+      canUpload = hasImplicitAccess(req.user, newParent);
+    }
+
+    if (!canUpload) {
+      throw createHttpError(
+        403,
+        "You do not have permission to move folder here"
+      );
+    }
+
+    // Move folder
+    await folder.moveTo(sanitizedParentId);
+
+    // Log activity
+    await ActivityLog.logFolderMove(
+      req.user.id,
+      folder,
+      oldParentId,
+      sanitizedParentId,
+      getUserInfo(req.user)
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Folder moved successfully",
+      data: folder,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @route   DELETE /api/folders/:id
+ * @desc    Soft delete folder
+ * @access  Private - Requires 'delete' permission
  */
 export const softDeleteFolder = async (req, res, next) => {
   try {
-    const parsedData = getFolderByIdSchema.safeParse(req.params);
-    validateRequest(parsedData);
+    const { id } = validateRequest(getFolderByIdSchema.safeParse(req.params));
 
-    const { id } = parsedData.data;
-    const userId = req.user.id;
-
-    const sanitizedId = sanitizeAndValidateId(id, 'Folder ID');
-
-    const folder = await FolderModel.findById(sanitizedId);
-
-    if (!folder) {
-      throw createHttpError(404, 'Folder not found');
-    }
+    // Folder is already validated by middleware
+    const folder = req.resource;
 
     if (folder.isDeleted) {
-      throw createHttpError(400, 'Folder is already deleted');
+      throw createHttpError(400, "Folder is already deleted");
     }
 
     await folder.softDelete();
 
-    // ✅ ACTIVITY LOG: FOLDER_DELETED
-    const userInfo = getUserInfo(req.user);
-    await ActivityLog.logFolderDelete(userId, folder, userInfo);
+    // Log activity
+    await ActivityLog.logFolderDelete(
+      req.user.id,
+      folder,
+      getUserInfo(req.user)
+    );
 
     res.status(200).json({
       success: true,
-      message: 'Folder deleted successfully',
+      message: "Folder deleted successfully",
     });
   } catch (error) {
     next(error);
@@ -737,49 +692,42 @@ export const softDeleteFolder = async (req, res, next) => {
 };
 
 /**
- * ✅ ACTIVITY LOGGED: Restore folder
- * Route: POST /api/folders/:id/restore
- * Activity: FOLDER_RESTORED (single item via logBulkRestore)
+ * @route   POST /api/folders/:id/restore
+ * @desc    Restore soft deleted folder
+ * @access  Private - Requires 'delete' permission
  */
 export const restoreFolder = async (req, res, next) => {
   try {
-    const parsedData = getFolderByIdSchema.safeParse(req.params);
-    validateRequest(parsedData);
+    const { id } = validateRequest(getFolderByIdSchema.safeParse(req.params));
 
-    const { id } = parsedData.data;
-    const userId = req.user.id;
-
-    const sanitizedId = sanitizeAndValidateId(id, 'Folder ID');
-
-    const folder = await FolderModel.findById(sanitizedId);
-
-    if (!folder) {
-      throw createHttpError(404, 'Folder not found');
-    }
+    // Folder is already validated by middleware
+    const folder = req.resource;
 
     if (!folder.isDeleted) {
-      throw createHttpError(400, 'Folder is not deleted');
+      throw createHttpError(400, "Folder is not deleted");
     }
 
     await folder.restore();
 
-    // ✅ ACTIVITY LOG: FOLDER_RESTORED (via logBulkRestore with single item)
-    const userInfo = getUserInfo(req.user);
+    // Log activity
     const item = {
       id: folder._id,
       name: folder.name,
-      type: 'folder',
-      itemType: 'folder',
+      type: "folder",
+      itemType: "folder",
       path: folder.path,
-      parent_id: folder.parent_id
+      parentId: folder.parentId,
     };
-    
-    await ActivityLog.logBulkRestore(userId, [item], userInfo);
+    await ActivityLog.logBulkRestore(
+      req.user.id,
+      [item],
+      getUserInfo(req.user)
+    );
 
     res.status(200).json({
       success: true,
-      message: 'Folder restored successfully',
-      data: folder
+      message: "Folder restored successfully",
+      data: folder,
     });
   } catch (error) {
     next(error);
@@ -787,125 +735,42 @@ export const restoreFolder = async (req, res, next) => {
 };
 
 /**
- * ✅ ACTIVITY LOGGED: Bulk restore folders and files
- * Route: POST /api/folders/bulk-restore
- * Activity: ITEMS_RESTORED (via logBulkRestore)
- */
-export const bulkRestoreFolders = async (req, res, next) => {
-  try {
-    const { items } = req.body; // Array of {id, type: 'folder' | 'file'}
-    const userId = req.user.id;
-
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      throw createHttpError(400, 'Items array is required');
-    }
-
-    const restoredItems = [];
-    const errors = [];
-
-    // Restore each item
-    for (const item of items) {
-      try {
-        if (item.type === 'folder') {
-          const folder = await FolderModel.findById(item.id);
-          if (folder && folder.isDeleted) {
-            await folder.restore();
-            restoredItems.push({
-              id: folder._id,
-              name: folder.name,
-              type: 'folder',
-              itemType: 'folder',
-              path: folder.path,
-              parent_id: folder.parent_id
-            });
-          }
-        } else if (item.type === 'file') {
-          const file = await DocumentModel.findById(item.id);
-          if (file && file.isDeleted) {
-            await file.restore();
-            restoredItems.push({
-              id: file._id,
-              name: file.name,
-              extension: file.extension || '',
-              type: 'file',
-              itemType: 'file',
-              size: file.size || 0,
-              path: file.path,
-              parent_id: file.parent_id
-            });
-          }
-        }
-      } catch (error) {
-        errors.push({
-          id: item.id,
-          type: item.type,
-          error: error.message
-        });
-      }
-    }
-
-    // ✅ ACTIVITY LOG: ITEMS_RESTORED (bulk restore)
-    if (restoredItems.length > 0) {
-      const userInfo = getUserInfo(req.user);
-      await ActivityLog.logBulkRestore(userId, restoredItems, userInfo);
-    }
-
-    res.status(200).json({
-      success: true,
-      message: `Successfully restored ${restoredItems.length} items`,
-      data: {
-        restored: restoredItems,
-        errors: errors
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Get folder stats
+ * @route   GET /api/folders/:id/stats
+ * @desc    Get folder statistics
+ * @access  Private - Requires 'view' permission
  */
 export const getFolderStats = async (req, res, next) => {
   try {
-    const parsedData = getFolderByIdSchema.safeParse(req.params);
-    validateRequest(parsedData);
+    const { id } = validateRequest(getFolderByIdSchema.safeParse(req.params));
 
-    const { id } = parsedData.data;
-    const sanitizedId = sanitizeAndValidateId(id, 'Folder ID');
+    // Folder is already validated by middleware
+    const folder = req.resource;
 
-    const folder = await FolderModel.findById(sanitizedId);
-
-    if (!folder) {
-      throw createHttpError(404, 'Folder not found');
-    }
-
-    const Item = mongoose.model('Item');
-    const childFolders = await Item.countDocuments({
-      parent_id: sanitizedId,
-      type: 'folder',
-      isDeleted: false
-    });
-
-    const documents = await DocumentModel.countDocuments({
-      parent_id: sanitizedId,
-      isDeleted: false
-    });
-
-    const escapedPath = folder.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const sizeResult = await DocumentModel.aggregate([
-      {
-        $match: {
-          path: new RegExp(`^${escapedPath}/`),
-          isDeleted: false
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalSize: { $sum: '$size' }
-        }
-      }
+    const [childFolders, documents, sizeResult] = await Promise.all([
+      FolderModel.countDocuments({
+        parentId: folder._id,
+        isDeleted: false,
+      }),
+      DocumentModel.countDocuments({
+        parentId: folder._id,
+        isDeleted: false,
+      }),
+      DocumentModel.aggregate([
+        {
+          $match: {
+            path: new RegExp(
+              `^${folder.path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`
+            ),
+            isDeleted: false,
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalSize: { $sum: "$size" },
+          },
+        },
+      ]),
     ]);
 
     const totalSize = sizeResult.length > 0 ? sizeResult[0].totalSize : 0;
@@ -916,8 +781,8 @@ export const getFolderStats = async (req, res, next) => {
         childFolders,
         documents,
         totalSize,
-        totalSizeFormatted: formatBytes(totalSize)
-      }
+        totalSizeFormatted: formatBytes(totalSize),
+      },
     });
   } catch (error) {
     next(error);
@@ -925,41 +790,48 @@ export const getFolderStats = async (req, res, next) => {
 };
 
 /**
- * Search folders
+ * @route   GET /api/folders/search
+ * @desc    Search folders by name
+ * @access  Private
  */
 export const searchFolders = async (req, res, next) => {
   try {
-    const parsedData = searchFoldersSchema.safeParse(req.query);
-    validateRequest(parsedData);
-
-    const { q, departmentName } = parsedData.data;
+    const { q, departmentName } = validateRequest(
+      searchFoldersSchema.safeParse(req.query)
+    );
 
     const sanitizedQuery = sanitizeInputWithXSS(q);
-    const escapedQuery = sanitizedQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedQuery = sanitizedQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
     const query = {
-      name: { $regex: escapedQuery, $options: 'i' },
-      isDeleted: false
+      name: { $regex: escapedQuery, $options: "i" },
+      isDeleted: false,
     };
 
     if (departmentName) {
       const sanitizedDeptName = sanitizeInputWithXSS(departmentName);
-      const escapedDeptName = sanitizedDeptName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escapedDeptName = sanitizedDeptName.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        "\\$&"
+      );
       query.path = new RegExp(`^/${escapedDeptName}/`);
     }
 
     const folders = await FolderModel.find(query)
       .sort({ name: 1 })
       .limit(50)
-      .populate('parent_id', 'name path');
+      .populate("parentId", "name path");
 
+    // Enrich with department info
     const enrichedFolders = await Promise.all(
       folders.map(async (folder) => {
         const department = await folder.getDepartment();
         return {
           ...folder.toObject(),
-          department: department ? { _id: department._id, name: department.name } : null,
-          breadcrumbs: folder.getBreadcrumbs()
+          department: department
+            ? { _id: department._id, name: department.name }
+            : null,
+          breadcrumbs: folder.getBreadcrumbs(),
         };
       })
     );
@@ -967,7 +839,7 @@ export const searchFolders = async (req, res, next) => {
     res.status(200).json({
       success: true,
       count: enrichedFolders.length,
-      data: enrichedFolders
+      data: enrichedFolders,
     });
   } catch (error) {
     next(error);
@@ -975,43 +847,142 @@ export const searchFolders = async (req, res, next) => {
 };
 
 /**
- * Get folder by path
+ * @route   POST /api/folders/:id/share
+ * @desc    Share folder with users/groups
+ * @access  Private - Requires 'share' permission
  */
-export const getFolderByPath = async (req, res, next) => {
+export const shareFolder = async (req, res, next) => {
   try {
-    const parsedData = getFolderByPathSchema.safeParse(req.query);
-    validateRequest(parsedData);
+    const { id } = validateRequest(getFolderByIdSchema.safeParse(req.params));
+    const { users = [], groups = [] } = validateRequest(
+      shareFolderSchema.safeParse(req.body)
+    );
 
-    const { path } = parsedData.data;
+    // Folder is already validated by middleware (canShare)
+    const folder = req.resource;
 
-    const sanitizedPath = sanitizeInputWithXSS(path);
-
-    const folder = await FolderModel.findByPath(sanitizedPath);
-
-    if (!folder) {
-      throw createHttpError(404, 'Folder not found at specified path');
+    if (folder.isDeleted) {
+      throw createHttpError(400, "Cannot share deleted folder");
     }
 
     const department = await folder.getDepartment();
+    if (!department) {
+      throw createHttpError(500, "Department not found");
+    }
+
+    const sharedWith = [];
+    const errors = [];
+
+    // Share with users
+    for (const userShare of users) {
+      try {
+        const targetUserId = sanitizeAndValidateId(userShare.userId, "User ID");
+
+        const targetUser = await mongoose.model("User").findById(targetUserId);
+        if (!targetUser || !targetUser.isActive) {
+          throw new Error("User not found or inactive");
+        }
+
+        // Check if user needs ACL
+        const { needsACL } = await import("../utils/helper/aclHelpers.js");
+
+        if (needsACL(targetUser, department)) {
+          const acl = await AccessControlModel.grantToSubject(
+            "FOLDER",
+            folder._id,
+            "USER",
+            targetUserId,
+            userShare.permissions,
+            req.user.id
+          );
+
+          sharedWith.push({
+            subjectType: "USER",
+            subjectId: targetUserId,
+            subjectName: targetUser.username || targetUser.email,
+            permissions: acl.permissions,
+          });
+        } else {
+          sharedWith.push({
+            subjectType: "USER",
+            subjectId: targetUserId,
+            subjectName: targetUser.username || targetUser.email,
+            permissions: ["view", "download", "upload", "delete", "share"],
+            note: "User has implicit access (admin/owner)",
+          });
+        }
+      } catch (error) {
+        errors.push({
+          userId: userShare.userId,
+          type: "USER",
+          error: error.message,
+        });
+      }
+    }
+
+    // Share with groups
+    for (const groupShare of groups) {
+      try {
+        const targetGroupId = sanitizeAndValidateId(
+          groupShare.groupId,
+          "Group ID"
+        );
+
+        const GroupModel = mongoose.model("Group");
+        const targetGroup = await GroupModel.findById(targetGroupId);
+
+        if (!targetGroup || !targetGroup.isActive) {
+          throw new Error("Group not found or inactive");
+        }
+
+        const acl = await AccessControlModel.grantToSubject(
+          "FOLDER",
+          folder._id,
+          "GROUP",
+          targetGroupId,
+          groupShare.permissions,
+          req.user.id
+        );
+
+        sharedWith.push({
+          subjectType: "GROUP",
+          subjectId: targetGroupId,
+          subjectName: targetGroup.name,
+          permissions: acl.permissions,
+        });
+      } catch (error) {
+        errors.push({
+          groupId: groupShare.groupId,
+          type: "GROUP",
+          error: error.message,
+        });
+      }
+    }
+
+    // Log activity
+    if (sharedWith.length > 0) {
+      await ActivityLog.logFolderShare(
+        req.user.id,
+        folder,
+        sharedWith,
+        getUserInfo(req.user)
+      );
+    }
 
     res.status(200).json({
       success: true,
+      message: `Folder shared with ${sharedWith.length} subject(s)`,
       data: {
-        ...folder.toObject(),
-        department: department ? { _id: department._id, name: department.name } : null,
-        breadcrumbs: folder.getBreadcrumbs()
-      }
+        folder: {
+          _id: folder._id,
+          name: folder.name,
+          path: folder.path,
+        },
+        sharedWith,
+        errors: errors.length > 0 ? errors : undefined,
+      },
     });
   } catch (error) {
     next(error);
   }
 };
-
-// Helper function
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 Bytes';
-  const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
-}

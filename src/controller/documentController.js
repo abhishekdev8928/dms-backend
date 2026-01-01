@@ -1,9 +1,11 @@
 /** 
- * UPDATED DOCUMENT CONTROLLERS - Complete Activity Logging Implementation
- * ✅ All activities logged using new Activity Model static methods
- * ✅ Proper userInfo object passed (name, email, avatar)
- * ✅ Added missing activity logs for download, preview, and version upload
+ * UPDATED DOCUMENT CONTROLLERS
+ * ✅ Changed parent_id → parentId
+ * ✅ Added type field ('document')
+ * ✅ Added fileType field (auto-detected from extension/mimeType)
+ * ✅ All activities logged using Activity Model static methods
  */
+import mongoose from 'mongoose';
 import createHttpError from 'http-errors';
 import DocumentModel from '../models/documentModel.js';
 import FolderModel from '../models/folderModel.js';
@@ -15,6 +17,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../config/config.js';
 import DocumentVersionModel from '../models/documentVersionModel.js';
 import { formatBytes, formatTimeAgo } from '../utils/formatter.js';
+import AccessControlModel from '../models/accessControlModel.js';
 import {
   sanitizeInput,
   sanitizeAndValidateId,
@@ -26,7 +29,6 @@ import {
   generatePresignedUrlsSchema,
   createDocumentSchema,
   getDocumentByIdSchema,
-  getDocumentsByParentSchema,
   updateDocumentSchema,
   moveDocumentSchema,
   documentOperationSchema,
@@ -35,18 +37,16 @@ import {
   getAllVersionsSchema,
   revertToVersionSchema,
   tagsOperationSchema,
-  findByTagsSchema,
-  findByExtensionSchema,
-  getDepartmentStatsSchema,
+
+  shareDocumentSchema,
+  
   getRecentDocumentsSchema
 } from '../validation/documentValidation.js';
 
 import {
   validateFile,
-  findGroupByExtension,
-  isExtensionBlocked,
-  isMimeTypeBlocked
 } from '../utils/constant.js';
+import { attachActions, attachActionsBulk } from '../utils/helper/aclHelpers.js';
 
 /**
  * Helper function to get user info for activity logging
@@ -76,25 +76,23 @@ export const generatePresignedUrls = async (req, res, next) => {
     // ✅ VALIDATE ALL FILES FIRST
     const invalidFiles = [];
     
-for (const file of files) {
-  // Extract extension safely
-  const ext = file.filename.includes(".")
-    ? `.${file.filename.split(".").pop().toLowerCase()}`
-    : null;
+    for (const file of files) {
+      // Extract extension safely
+      const ext = file.filename.includes(".")
+        ? `.${file.filename.split(".").pop().toLowerCase()}`
+        : null;
 
-  const validation = validateFile(ext, file.mimeType);
+      const validation = validateFile(ext, file.mimeType);
 
-  if (!validation.valid) {
-    invalidFiles.push({
-      filename: file.filename,
-      reason: validation.reason,
-      extension: ext,
-      mimeType: file.mimeType
-    });
-  }
-}
-
-
+      if (!validation.valid) {
+        invalidFiles.push({
+          filename: file.filename,
+          reason: validation.reason,
+          extension: ext,
+          mimeType: file.mimeType
+        });
+      }
+    }
 
     if (invalidFiles.length > 0) {
       throw createHttpError(400, `Invalid files detected: ${JSON.stringify(invalidFiles)}`);
@@ -143,7 +141,7 @@ for (const file of files) {
 /**
  * ✅ Create/Upload a new document
  * Route: POST /api/documents
- * NOTE: Activity logging removed - Frontend calls POST /api/activity/bulk-upload after all files uploaded
+ * Changes: parent_id → parentId, added type and fileType
  */
 export const createDocument = async (req, res, next) => {
   try {
@@ -153,7 +151,7 @@ export const createDocument = async (req, res, next) => {
     const data = parsed.data.body;
     const createdBy = req.user.id;
 
-    // ✅ VALIDATE FILE USING NEW CONSTANTS
+    // ✅ VALIDATE FILE USING CONSTANTS
     const sanitizedExtension = sanitizeInput(data.extension);
     const sanitizedMimeType = sanitizeInput(data.mimeType);
     
@@ -163,10 +161,15 @@ export const createDocument = async (req, res, next) => {
       throw createHttpError(400, validation.reason);
     }
 
+    // ✅ AUTO-DETERMINE fileType using DocumentModel helper
+    const fileType = DocumentModel.determineFileType(sanitizedMimeType, sanitizedExtension);
+
     const sanitizedData = {
       name: sanitizeInputWithXSS(data.name),
       originalName: sanitizeInputWithXSS(data.originalName),
-      parent_id: sanitizeAndValidateId(data.parent_id, "Parent ID"),
+      parentId: sanitizeAndValidateId(data.parentId, "Parent ID"), // ✅ Changed from parent_id
+      type: 'document', // ✅ Added type field
+      fileType: fileType, // ✅ Added fileType field
       fileUrl: sanitizeInput(data.fileUrl),
       mimeType: sanitizedMimeType,
       extension: sanitizedExtension,
@@ -178,15 +181,10 @@ export const createDocument = async (req, res, next) => {
       createdBy,
     };
 
-    // ✅ USE VALIDATION RESULT FOR TYPE
-    sanitizedData.type = validation.category === 'document' 
-      ? DocumentModel.getTypeFromMimeType(sanitizedData.mimeType, sanitizedData.extension)
-      : validation.category;
-
     // Get parent for folder name
     let parent =
-      (await FolderModel.findById(sanitizedData.parent_id)) ||
-      (await DepartmentModel.findById(sanitizedData.parent_id));
+      (await FolderModel.findById(sanitizedData.parentId)) ||
+      (await DepartmentModel.findById(sanitizedData.parentId));
 
     if (!parent) throw createHttpError(404, "Parent folder/department not found");
 
@@ -200,21 +198,23 @@ export const createDocument = async (req, res, next) => {
     await document.save();
 
     // Create initial version
-    const initialVersion = await DocumentVersionModel.create({
-      documentId: document._id,
-      versionNumber: 1,
-      name: sanitizedData.name,
-      originalName: sanitizedData.originalName,
-      fileUrl: sanitizedData.fileUrl,
-      size: sanitizedData.size,
-      mimeType: sanitizedData.mimeType,
-      extension: sanitizedData.extension,
-      type: sanitizedData.type,
-      isLatest: true,
-      changeDescription: "Initial upload",
-      pathAtCreation: document.path,
-      createdBy,
-    });
+   // Create initial version
+const initialVersion = await DocumentVersionModel.create({
+  documentId: document._id,
+  versionNumber: 1,
+  name: sanitizedData.name,
+  originalName: sanitizedData.originalName,
+  type: 'document', // 🔥 ADD THIS LINE
+  fileUrl: sanitizedData.fileUrl,
+  size: sanitizedData.size,
+  mimeType: sanitizedData.mimeType,
+  extension: sanitizedData.extension,
+  fileType: sanitizedData.fileType,
+  isLatest: true,
+  changeDescription: "Initial upload",
+  pathAtCreation: document.path,
+  createdBy,
+});
 
     document.currentVersionId = initialVersion._id;
     await document.save();
@@ -227,7 +227,8 @@ export const createDocument = async (req, res, next) => {
         currentVersion: initialVersion,
         fileValidation: {
           group: validation.group,
-          category: validation.category
+          category: validation.category,
+          fileType: fileType
         }
       },
     });
@@ -236,50 +237,8 @@ export const createDocument = async (req, res, next) => {
   }
 };
 
-export const validateFileBeforeUpload = async (req, res, next) => {
-  try {
-    const { extension, mimeType } = req.body;
-    
-    if (!extension || !mimeType) {
-      throw createHttpError(400, 'Extension and mimeType are required');
-    }
-
-    const sanitizedExtension = sanitizeInput(extension);
-    const sanitizedMimeType = sanitizeInput(mimeType);
-    
-    const validation = validateFile(sanitizedExtension, sanitizedMimeType);
-    
-    if (!validation.valid) {
-      return res.status(400).json({
-        success: false,
-        valid: false,
-        reason: validation.reason,
-        extension: validation.extension,
-        mimeType: validation.mimeType
-      });
-    }
-
-    // Get format group info
-    const formatGroup = findGroupByExtension(sanitizedExtension);
-
-    res.status(200).json({
-      success: true,
-      valid: true,
-      data: {
-        group: validation.group,
-        category: validation.category,
-        description: formatGroup?.description,
-        allowedExtensions: formatGroup?.extensions,
-        message: 'File is valid and allowed'
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
-};
 /**
  * Add tags to document
- * No activity logging needed for tag operations
  */
 export const addTags = async (req, res, next) => {
   try {
@@ -316,7 +275,6 @@ export const addTags = async (req, res, next) => {
 
 /**
  * Remove tags from document
- * No activity logging needed for tag operations
  */
 export const removeTags = async (req, res, next) => {
   try {
@@ -352,109 +310,8 @@ export const removeTags = async (req, res, next) => {
 };
 
 /**
- * Find documents by tags
- */
-export const findByTags = async (req, res, next) => {
-  try {
-    const parsed = findByTagsSchema.safeParse({ query: req.query });
-    validateRequest(parsed);
-
-    const tagArray = parsed.data.query.tags;
-    const sanitizedTags = tagArray.map(tag => sanitizeInputWithXSS(tag));
-
-    const documents = await DocumentModel.find({ 
-      tags: { $in: sanitizedTags }, 
-      isDeleted: false 
-    })
-      .populate('createdBy', 'name email')
-      .populate('updatedBy', 'name email');
-
-    const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc.toObject()));
-
-    res.status(200).json({
-      success: true,
-      count: sanitizedDocuments.length,
-      data: sanitizedDocuments
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Find documents by extension
- */
-export const findByExtension = async (req, res, next) => {
-  try {
-    const parsed = findByExtensionSchema.safeParse({ params: req.params });
-    validateRequest(parsed);
-
-    const { ext } = parsed.data.params;
-    const sanitizedExt = sanitizeInput(ext);
-
-    const documents = await DocumentModel.find({ 
-      extension: sanitizedExt, 
-      isDeleted: false 
-    }).populate('createdBy', 'name email');
-
-    const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc.toObject()));
-
-    res.status(200).json({
-      success: true,
-      count: sanitizedDocuments.length,
-      data: sanitizedDocuments
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Get department statistics
- */
-export const getDepartmentStats = async (req, res, next) => {
-  try {
-    const parsed = getDepartmentStatsSchema.safeParse({ params: req.params });
-    validateRequest(parsed);
-
-    const { departmentId } = parsed.data.params;
-    const sanitizedDeptId = sanitizeAndValidateId(departmentId, 'Department ID');
-
-    const department = await DepartmentModel.findById(sanitizedDeptId);
-    if (!department) {
-      throw createHttpError(404, 'Department not found');
-    }
-
-    const stats = await DocumentModel.aggregate([
-      { 
-        $match: { 
-          path: { $regex: `^/${department.name}/` }, 
-          isDeleted: false 
-        } 
-      },
-      {
-        $group: {
-          _id: '$extension',
-          totalSize: { $sum: '$size' },
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-
-    const sanitizedStats = sanitizeObjectXSS(stats);
-
-    res.status(200).json({
-      success: true,
-      data: sanitizedStats
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * ✅ Get document by ID
- * No activity logging needed for simple reads
+ * ✅ Get document by ID with actions
+ * Changes: parent_id → parentId in response + added actions
  */
 export const getDocumentById = async (req, res, next) => {
   try {
@@ -467,15 +324,16 @@ export const getDocumentById = async (req, res, next) => {
     const document = await DocumentModel.findById(sanitizedId)
       .populate('createdBy', 'name email avatar')
       .populate('updatedBy', 'name email avatar')
-      .populate('currentVersionId');
+      .populate('currentVersionId')
+      .lean(); // ✅ Added lean() for consistency
 
     if (!document) {
       throw createHttpError(404, 'Document not found');
     }
 
-    // Get parent info
+    // Get parent info (using parentId)
     let parentInfo = null;
-    const parentFolder = await FolderModel.findById(document.parent_id);
+    const parentFolder = await FolderModel.findById(document.parentId);
     
     if (parentFolder) {
       parentInfo = { 
@@ -484,7 +342,7 @@ export const getDocumentById = async (req, res, next) => {
         type: 'Folder' 
       };
     } else {
-      const parentDepartment = await DepartmentModel.findById(document.parent_id);
+      const parentDepartment = await DepartmentModel.findById(document.parentId);
       if (parentDepartment) {
         parentInfo = { 
           _id: parentDepartment._id, 
@@ -494,10 +352,17 @@ export const getDocumentById = async (req, res, next) => {
       }
     }
 
-    const responseData = sanitizeObjectXSS({
-      ...document.toJSON(),
+    // Add parent info to document before attaching actions
+    const documentWithParent = {
+      ...document,
       parent: parentInfo
-    });
+    };
+
+    // 🔐 Attach actions for this single document
+    const documentWithActions = await attachActions(documentWithParent, req.user, 'DOCUMENT');
+
+    // Sanitize the final response
+    const responseData = sanitizeObjectXSS(documentWithActions);
 
     res.status(200).json({
       success: true,
@@ -507,55 +372,6 @@ export const getDocumentById = async (req, res, next) => {
     next(error);
   }
 };
-
-/**
- * Get documents by parent
- */
-export const getDocumentsByParent = async (req, res, next) => {
-  try {
-    const parsed = getDocumentsByParentSchema.safeParse({ 
-      params: req.params,
-      query: req.query 
-    });
-    validateRequest(parsed);
-
-    const { parentId } = parsed.data.params;
-    const includeDeleted = parsed.data.query?.includeDeleted === 'true';
-    
-    const sanitizedParentId = sanitizeAndValidateId(parentId, 'Parent ID');
-
-    let parent = await FolderModel.findById(sanitizedParentId);
-    let parentType = 'Folder';
-    
-    if (!parent) {
-      parent = await DepartmentModel.findById(sanitizedParentId);
-      parentType = 'Department';
-      
-      if (!parent) {
-        throw createHttpError(404, 'Parent folder or department not found');
-      }
-    }
-
-    const documents = await DocumentModel.findByFolder(
-      sanitizedParentId,
-      includeDeleted
-    ).populate('createdBy', 'name email')
-      .populate('updatedBy', 'name email');
-
-    const sanitizedDocuments = documents.map(doc => sanitizeObjectXSS(doc.toObject()));
-
-    res.status(200).json({
-      success: true,
-      count: sanitizedDocuments.length,
-      parentType,
-      data: sanitizedDocuments
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const getDocumentsByFolder = getDocumentsByParent;
 
 /**
  * Get recent documents
@@ -664,8 +480,9 @@ export const updateDocument = async (req, res, next) => {
 
 /**
  * ✅ ACTIVITY LOGGED: Move document
- * Route: PUT /api/documents/:id/move
+ * Route: POST /api/documents/:id/move
  * Activity: FILE_MOVED
+ * Changes: Uses parentId
  */
 export const moveDocument = async (req, res, next) => {
   try {
@@ -679,7 +496,7 @@ export const moveDocument = async (req, res, next) => {
     const document = await DocumentModel.findById(id);
     if (!document) throw createHttpError(404, "Document not found");
 
-    const oldParentId = document.parent_id;
+    const oldParentId = document.parentId; // ✅ Changed from parent_id
 
     // Get old parent info
     let fromFolder = await FolderModel.findById(oldParentId);
@@ -767,7 +584,8 @@ export const softDeleteDocument = async (req, res, next) => {
 /**
  * ✅ ACTIVITY LOGGED: Restore deleted document
  * Route: POST /api/documents/:id/restore
- * Activity: FILE_RESTORED (single item via logBulkRestore)
+ * Activity: FILE_RESTORED
+ * Changes: Uses parentId
  */
 export const restoreDocument = async (req, res, next) => {
   try {
@@ -790,7 +608,7 @@ export const restoreDocument = async (req, res, next) => {
 
     await document.restore();
 
-    // ✅ ACTIVITY LOG: FILE_RESTORED (via logBulkRestore with single item)
+    // ✅ ACTIVITY LOG: FILE_RESTORED
     const userInfo = getUserInfo(req.user);
     const item = {
       id: document._id,
@@ -800,7 +618,7 @@ export const restoreDocument = async (req, res, next) => {
       itemType: 'file',
       size: document.size,
       path: document.path,
-      parent_id: document.parent_id
+      parentId: document.parentId // ✅ Changed from parent_id
     };
     
     await ActivityLog.logBulkRestore(userId, [item], userInfo);
@@ -828,18 +646,38 @@ export const searchDocuments = async (req, res, next) => {
     const { q, departmentId, limit } = parsed.data.query;
     const sanitizedQuery = sanitizeInputWithXSS(q);
 
-    let departmentName = null;
+    let resolvedDepartmentId = null;
+    
     if (departmentId) {
-      const sanitizedDeptId = sanitizeAndValidateId(departmentId, 'Department ID');
-      const department = await DepartmentModel.findById(sanitizedDeptId);
-      if (department) {
-        departmentName = department.name;
+      // ✅ Check if it's an ObjectId or a name string
+      if (mongoose.Types.ObjectId.isValid(departmentId) && departmentId.length === 24) {
+        // It's already an ObjectId
+        resolvedDepartmentId = sanitizeAndValidateId(departmentId, 'Department ID');
+      } else {
+        // It's a department name - look it up
+        const sanitizedName = sanitizeInputWithXSS(departmentId);
+        const department = await DepartmentModel.findOne({ 
+          name: new RegExp(`^${sanitizedName}$`, 'i') 
+        });
+        
+        if (department) {
+          resolvedDepartmentId = department._id;
+        } else {
+          // Department not found - return empty results
+          return res.status(200).json({
+            success: true,
+            count: 0,
+            data: [],
+            message: `No department found with name: ${sanitizedName}`
+          });
+        }
       }
     }
 
+    // ✅ Pass ObjectId (or null) instead of name string
     const documents = await DocumentModel.searchByName(
       sanitizedQuery,
-      departmentName,
+      resolvedDepartmentId, // ✅ Now passing ObjectId instead of name
       { limit: limit || 20 }
     ).populate('createdBy', 'name email');
 
@@ -854,12 +692,9 @@ export const searchDocuments = async (req, res, next) => {
     next(error);
   }
 };
-
 /**
  * ✅ Generate download URL
  * Route: GET /api/documents/:id/download
- * NOTE: FILE_DOWNLOADED is not in your activity model enum
- * If you want to track downloads, add FILE_DOWNLOADED to the action enum and create a static method
  */
 export const generateDownloadUrl = async (req, res, next) => {
   try {
@@ -908,9 +743,6 @@ export const generateDownloadUrl = async (req, res, next) => {
       expiresIn: 3600,
     });
 
-    // ⚠️ FILE_DOWNLOADED not in your activity model
-    // If you want to track this, add it to the enum and create ActivityLog.logFileDownload()
-
     res.status(200).json({
       success: true,
       data: {
@@ -925,15 +757,16 @@ export const generateDownloadUrl = async (req, res, next) => {
 };
 
 /**
- * ✅ Create new version (Re-upload)
+ * ✅ ACTIVITY LOGGED: Create new version (Re-upload)
  * Route: POST /api/documents/:id/versions
- * NOTE: FILE_VERSION_UPLOADED is not in your activity model enum
- * If you want to track version uploads, add FILE_VERSION_UPLOADED to the enum and create a static method
+ * Activity: FILE_VERSION_UPLOADED
+ * Changes: Added fileType
  */
-
 /**
- * Create new version (reupload)
- * Now with activity logging
+ * ✅ ACTIVITY LOGGED: Create new version (Re-upload)
+ * Route: POST /api/documents/:id/versions
+ * Activity: FILE_VERSION_UPLOADED
+ * Changes: Added fileType and type
  */
 export const createVersion = async (req, res, next) => {
   try {
@@ -950,21 +783,23 @@ export const createVersion = async (req, res, next) => {
     const document = await DocumentModel.findById(id);
     if (!document) throw createHttpError(404, "Document not found");
 
-    // Detect file type
-    const detectedType = DocumentModel.getTypeFromMimeType(
+    // ✅ Auto-determine fileType
+    const fileType = DocumentModel.determineFileType(
       sanitizeInput(data.mimeType),
       sanitizeInput(data.extension)
     );
 
     // Build file metadata
     const fileMetadata = {
+      type: 'document', // ✅ Added required type field
       fileUrl: sanitizeInput(data.fileUrl),
       size: data.size,
       mimeType: sanitizeInput(data.mimeType),
       extension: sanitizeInput(data.extension),
-      name: sanitizeInputWithXSS(data.name),
-      originalName: sanitizeInputWithXSS(data.originalName),
-      type: detectedType,
+      fileType: fileType, // ✅ Added fileType
+      // ✅ Only sanitize if values exist
+      ...(data.name && { name: sanitizeInputWithXSS(data.name) }),
+      ...(data.originalName && { originalName: sanitizeInputWithXSS(data.originalName) }),
     };
 
     // Create new version
@@ -974,7 +809,7 @@ export const createVersion = async (req, res, next) => {
       userId
     );
 
-    // ✅ Log the version upload activity (REUPLOAD = UPLOAD)
+    // ✅ ACTIVITY LOG: FILE_VERSION_UPLOADED
     try {
       await ActivityLog.logFileVersionUpload(
         userId,
@@ -984,19 +819,15 @@ export const createVersion = async (req, res, next) => {
           name: document.name,
           extension: document.extension,
           type: document.type,
+          fileType: document.fileType, // ✅ Added fileType
           size: fileMetadata.size,
-          parent_id: document.parent_id
+          parentId: document.parentId // ✅ Changed from parent_id
         },
-        newVersion.versionNumber, // Pass the new version number
-        {
-          name: req.user.name || req.user.username,
-          email: req.user.email,
-          avatar: req.user.avatar
-        }
+        newVersion.versionNumber,
+        getUserInfo(req.user)
       );
     } catch (logError) {
       console.error('Failed to log version upload activity:', logError);
-      // Don't fail the request if logging fails
     }
 
     res.status(201).json({
@@ -1008,9 +839,6 @@ export const createVersion = async (req, res, next) => {
     next(error);
   }
 };
-
-
-
 /**
  * Get all versions
  */
@@ -1028,7 +856,7 @@ export const getAllVersions = async (req, res, next) => {
     }
 
     const versions = await DocumentVersionModel.find({ documentId: sanitizedId })
-      .populate('documentId', 'name originalName _id extension type')
+      .populate('documentId', 'name originalName _id extension type fileType') // ✅ Added fileType
       .populate('createdBy', 'username email')
       .lean();
 
@@ -1056,10 +884,68 @@ export const getAllVersions = async (req, res, next) => {
   }
 };
 
+
 /**
- * ✅ Revert to version
- * Route: POST /api/documents/:id/revert
- * NOTE: This internally creates a new version, so FILE_VERSION_UPLOADED could be logged if you add the method
+ * Get specific version by version number or ObjectId
+ */
+export const getVersionByNumber = async (req, res, next) => {
+  try {
+    const document = req.resource; // From canView middleware
+    const versionParam = req.params.versionNumber;
+
+    let version;
+
+    // Check if it's a valid ObjectId
+    if (mongoose.Types.ObjectId.isValid(versionParam) && versionParam.length === 24) {
+      // It's an ObjectId
+      version = await DocumentVersionModel.findOne({
+        _id: versionParam,
+        documentId: document._id
+      })
+        .populate('documentId', 'name originalName _id extension type fileType')
+        .populate('createdBy', 'username email')
+        .lean();
+    } else {
+      // It's a version number
+      const versionNumber = parseInt(versionParam);
+      
+      if (isNaN(versionNumber) || versionNumber < 1) {
+        throw createHttpError(400, "Invalid version number. Must be a positive integer or valid ObjectId.");
+      }
+
+      version = await DocumentVersionModel.findOne({
+        documentId: document._id,
+        versionNumber: versionNumber
+      })
+        .populate('documentId', 'name originalName _id extension type fileType')
+        .populate('createdBy', 'username email')
+        .lean();
+    }
+
+    if (!version) {
+      throw createHttpError(404, `Version not found for this document`);
+    }
+
+    const formattedVersion = {
+      ...sanitizeObjectXSS(version),
+      sizeFormatted: formatBytes(version.size),
+      createdAgo: formatTimeAgo(version.createdAt),
+      id: version._id.toString()
+    };
+
+    res.status(200).json({
+      success: true,
+      data: formattedVersion
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+/**
+ * ✅ ACTIVITY LOGGED: Revert to version
+ * Route: POST /api/documents/:id/versions/revert
+ * Activity: FILE_VERSION_RESTORED
+ * Changes: Uses parentId
  */
 export const revertToVersion = async (req, res, next) => {
   try {
@@ -1079,7 +965,7 @@ export const revertToVersion = async (req, res, next) => {
     // Use MODEL method (revertToVersion)
     const newVersion = await document.revertToVersion(versionNumber, userId);
 
-    // ✅ Log the revert as a RESTORE activity (not upload!)
+    // ✅ ACTIVITY LOG: FILE_VERSION_RESTORED
     try {
       await ActivityLog.logFileVersionRestore(
         userId,
@@ -1089,26 +975,248 @@ export const revertToVersion = async (req, res, next) => {
           name: document.name,
           extension: document.extension,
           type: document.type,
+          fileType: document.fileType, // ✅ Added fileType
           size: newVersion.size,
-          parent_id: document.parent_id
+          parentId: document.parentId // ✅ Changed from parent_id
         },
-        versionNumber,              // The version that was restored
-        newVersion.versionNumber,   // The new version number created by the restore
-        {
-          name: req.user.name || req.user.username,
-          email: req.user.email,
-          avatar: req.user.avatar
-        }
+        versionNumber,
+        newVersion.versionNumber,
+        getUserInfo(req.user)
       );
     } catch (logError) {
       console.error('Failed to log version restore activity:', logError);
-      // Don't fail the request if logging fails
     }
 
     res.status(200).json({
       success: true,
       message: `Version ${versionNumber} restored successfully`,
       data: newVersion
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * ✅ ACTIVITY LOGGED: Share document with users/groups
+ * Route: POST /api/documents/:id/share
+ * Activity: FILE_SHARED
+ */
+export const shareDocument = async (req, res, next) => {
+  try {
+    const parsed = shareDocumentSchema.safeParse({
+      params: req.params,
+      body: req.body
+    });
+    validateRequest(parsed);
+
+    const { id } = parsed.data.params;
+    const { users = [], groups = [] } = parsed.data.body;
+    
+    const sanitizedId = sanitizeAndValidateId(id, 'Document ID');
+
+    // Document is already validated by middleware (canShare)
+    const document = req.resource;
+
+    if (document.isDeleted) {
+      throw createHttpError(400, 'Cannot share deleted document');
+    }
+
+    const department = await DepartmentModel.findById(document.departmentId);
+    if (!department) {
+      throw createHttpError(500, 'Department not found');
+    }
+
+    const sharedWith = [];
+    const errors = [];
+
+    // Import ACL helper
+    const { needsACL } = await import('../utils/helper/aclHelpers.js');
+    const AccessControlModel = (await import('../models/accessControlModel.js')).default;
+    const UserModel = mongoose.model('User');
+
+    // Share with users
+    for (const userShare of users) {
+      try {
+        const targetUserId = sanitizeAndValidateId(userShare.userId, 'User ID');
+
+        const targetUser = await UserModel.findById(targetUserId);
+        if (!targetUser || !targetUser.isActive) {
+          throw new Error('User not found or inactive');
+        }
+
+        // Check if user needs ACL
+        if (needsACL(targetUser, department)) {
+          const acl = await AccessControlModel.grantToSubject(
+            'DOCUMENT',
+            document._id,
+            'USER',
+            targetUserId,
+            userShare.permissions,
+            req.user.id
+          );
+
+          sharedWith.push({
+            subjectType: 'USER',
+            subjectId: targetUserId,
+            subjectName: targetUser.username || targetUser.email,
+            permissions: acl.permissions
+          });
+        } else {
+          sharedWith.push({
+            subjectType: 'USER',
+            subjectId: targetUserId,
+            subjectName: targetUser.username || targetUser.email,
+            permissions: ['view', 'download', 'upload', 'delete', 'share'],
+            note: 'User has implicit access (admin/owner)'
+          });
+        }
+      } catch (error) {
+        errors.push({
+          userId: userShare.userId,
+          type: 'USER',
+          error: error.message
+        });
+      }
+    }
+
+    // Share with groups
+    for (const groupShare of groups) {
+      try {
+        const targetGroupId = sanitizeAndValidateId(groupShare.groupId, 'Group ID');
+
+        const GroupModel = mongoose.model('Group');
+        const targetGroup = await GroupModel.findById(targetGroupId);
+
+        if (!targetGroup || !targetGroup.isActive) {
+          throw new Error('Group not found or inactive');
+        }
+
+        const acl = await AccessControlModel.grantToSubject(
+          'DOCUMENT',
+          document._id,
+          'GROUP',
+          targetGroupId,
+          groupShare.permissions,
+          req.user.id
+        );
+
+        sharedWith.push({
+          subjectType: 'GROUP',
+          subjectId: targetGroupId,
+          subjectName: targetGroup.name,
+          permissions: acl.permissions
+        });
+      } catch (error) {
+        errors.push({
+          groupId: groupShare.groupId,
+          type: 'GROUP',
+          error: error.message
+        });
+      }
+    }
+
+    // ✅ ACTIVITY LOG: FILE_SHARED
+    if (sharedWith.length > 0) {
+      try {
+        await ActivityLog.logFileShare(
+          req.user.id,
+          document,
+          sharedWith,
+          getUserInfo(req.user)
+        );
+      } catch (logError) {
+        console.error('Failed to log share activity:', logError);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Document shared with ${sharedWith.length} subject(s)`,
+      data: {
+        document: {
+          _id: document._id,
+          name: document.name,
+          path: document.path
+        },
+        sharedWith,
+        errors: errors.length > 0 ? errors : undefined
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
+/**
+ * ✅ Generate download URL for specific version
+ * Route: GET /api/documents/:id/versions/:versionNumber/download
+ */
+export const generateVersionDownloadUrl = async (req, res, next) => {
+  try {
+    const { id, versionNumber } = req.params;
+    const sanitizedDocId = sanitizeAndValidateId(id, "Document ID");
+    const versionParam = versionNumber;
+
+    // Verify document exists (already checked by canDownload middleware)
+    const document = await DocumentModel.findById(sanitizedDocId);
+    if (!document) {
+      throw createHttpError(404, "Document not found");
+    }
+
+    let version;
+
+    // Check if it's a valid ObjectId (version ID) or version number
+    if (mongoose.Types.ObjectId.isValid(versionParam) && versionParam.length === 24) {
+      // It's a version ObjectId
+      version = await DocumentVersionModel.findOne({
+        _id: versionParam,
+        documentId: document._id
+      });
+    } else {
+      // It's a version number
+      const versionNum = parseInt(versionParam);
+      
+      if (isNaN(versionNum) || versionNum < 1) {
+        throw createHttpError(400, "Invalid version number. Must be a positive integer or valid ObjectId.");
+      }
+
+      version = await DocumentVersionModel.findOne({
+        documentId: document._id,
+        versionNumber: versionNum
+      });
+    }
+
+    if (!version) {
+      throw createHttpError(404, `Version not found for this document`);
+    }
+
+    // Generate Signed URL for the version
+    const bucketName = process.env.BUCKET_NAME || config.aws.bucketName;
+    const downloadName = version.originalName || version.name;
+
+    const command = new GetObjectCommand({
+      Bucket: bucketName,
+      Key: version.fileUrl,
+      ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(
+        downloadName
+      )}`,
+    });
+
+    const signedUrl = await getSignedUrl(s3Client, command, {
+      expiresIn: 3600,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        url: signedUrl,
+        expiresIn: 3600,
+        filename: downloadName,
+        versionNumber: version.versionNumber,
+        versionId: version._id
+      },
     });
   } catch (error) {
     next(error);

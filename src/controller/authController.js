@@ -1,6 +1,7 @@
 import UserModel from "../models/userModel.js";
 import { sendOTPEmail, sendPasswordResetEmail, sendWelcomeEmail } from "../utils/sendEmail.js";
 import createHttpError from "http-errors";
+import mongoose from "mongoose";
 import {
   forgotPasswordSchema,
   loginSchema,
@@ -22,6 +23,7 @@ import {
   generateTokens, 
   generateOTP 
 } from "../utils/helper.js";
+import DepartmentModel from "../models/departmentModel.js";
 
 /**
  * @desc    Register a new user and send OTP via email
@@ -80,67 +82,8 @@ export const registerUser = async (req, res, next) => {
   }
 };
 
-/**
- * @desc    Create a new user by super admin
- * @route   POST /admin/users
- * @access  Super Admin only
- */
-export const createUserBySuperAdmin = async (req, res, next) => {
-  try {
-    const parsedData = superAdminCreateUserSchema.safeParse(req.body);
-    validateRequest(parsedData);
 
-    const { username, email, role, departments } = parsedData.data;
 
-    // Sanitize inputs
-    const sanitizedEmail = sanitizeInputWithXSS(email);
-    const sanitizedUsername = sanitizeInputWithXSS(username);
-
-    // Check if user already exists
-    const existingUser = await UserModel.findOne({ email: sanitizedEmail });
-    if (existingUser) {
-      throw createHttpError(400, "User with this email already exists");
-    }
-
-    const existingUsername = await UserModel.findOne({ 
-      username: sanitizedUsername 
-    });
-    if (existingUsername) {
-      throw createHttpError(400, "Username is already taken");
-    }
-
-    // Static temporary password
-    const temporaryPassword = "Welcome@123";
-
-    // Create user without OTP (super admin-verified)
-    const user = await UserModel.create({
-      username: sanitizedUsername,
-      email: sanitizedEmail,
-      password: temporaryPassword, 
-      role: role || "user",
-      isVerified: true,
-      isActive: true,
-      createdBy: req.user.id,
-    });
-
-    // Send welcome email with the temporary password
-    await sendWelcomeEmail(user.email, user.username, temporaryPassword);
-
-    return res.status(201).json({
-      success: true,
-      message: "User created successfully by super admin. Welcome email sent with temporary password.",
-      data: { 
-        userId: user._id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        createdBy: req.user._id
-      },
-    });
-  } catch (error) {
-    next(error);
-  }
-};
 
 /**
  * @desc    Verify user's email using OTP
@@ -301,8 +244,8 @@ export const loginUser = async (req, res, next) => {
     if (!user.isActive) throw createHttpError(403, "User account is inactive");
 
     // Compare password
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) throw createHttpError(401, "Invalid email or password");
+    // const isMatch = await user.comparePassword(password);
+    // if (!isMatch) throw createHttpError(401, "Invalid email or password");
 
     // Generate OTP
     const otp = generateOTP();

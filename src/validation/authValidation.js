@@ -15,7 +15,7 @@ export const registerSchema = z.object({
 export const superAdminCreateUserSchema = z.object({
   username: z.string().min(3).max(30),
   email: z.string().email(),
-  role: z.enum(["super_admin", "admin", "department_owner", "member_bank", "user"]),
+  role: z.enum(["SUPER_ADMIN", "ADMIN", "DEPARTMENT_OWNER" , "USER"]),
   departments: z.array(z.string()).optional(),
 });
 

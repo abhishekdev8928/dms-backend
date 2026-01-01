@@ -15,42 +15,44 @@ import {
   getDepartmentByNameSchema,
   getDepartmentHierarchySchema
 } from '../validation/departmentValidation.js';
-
+import { attachDepartmentActionsBulk } from '../utils/helper/departmentHelper.js';
+export const ROLES = {
+  SUPER_ADMIN: "SUPER_ADMIN",
+  ADMIN: "ADMIN",
+  DEPARTMENT_OWNER: "DEPARTMENT_OWNER",
+};
 /**
  * Create a new department
  * Route: POST /api/departments
- * Access: Private
- * Body:
- *   - name: string (required) - Department name (max 255 chars)
- *   - description: string (optional) - Department description
- * Response: { success: true, message, data: department }
+ * Access: Private - Super Admin, Admin only (via route middleware)
  */
 export const createDepartment = async (req, res, next) => {
   try {
-    // Validate with Zod
     const parsedData = createDepartmentSchema.safeParse(req.body);
     validateRequest(parsedData);
 
     const { name, description } = parsedData.data;
     const createdBy = req.user.id;
 
-    // Sanitize inputs
     const sanitizedName = sanitizeInputWithXSS(name);
     const sanitizedDescription = description ? sanitizeInputWithXSS(description) : '';
 
-    // Check duplicate
+    // Check duplicate (only ORG departments)
     const existingDepartment = await DepartmentModel.findOne({
-      name: { $regex: new RegExp(`^${sanitizedName}$`, 'i') }
+      name: { $regex: new RegExp(`^${sanitizedName}$`, 'i') },
+      ownerType: 'ORG'
     });
 
     if (existingDepartment) {
       throw createHttpError(409, 'Department with this name already exists');
     }
 
-    // Create department
+    // Create ORG department
     const department = await DepartmentModel.create({
       name: sanitizedName,
       description: sanitizedDescription,
+      ownerType: 'ORG',
+      ownerId: null,
       createdBy
     });
 
@@ -67,31 +69,41 @@ export const createDepartment = async (req, res, next) => {
 /**
  * Get all departments with pagination and filtering
  * Route: GET /api/departments
- * Access: Private
- * Query:
- *   - page: number (optional, default: 1) - Page number
- *   - limit: number (optional, default: 10, max: 100) - Items per page
- *   - search: string (optional) - Search in name and description
- *   - sortBy: string (optional, default: 'createdAt') - Field to sort by
- *   - order: 'asc' | 'desc' (optional, default: 'desc') - Sort order
- *   - activeOnly: 'true' | 'false' (optional) - Filter active departments only
- * Response: { success: true, count, page, limit, totalPages, data: [departments] }
+ * Access: Private - All authenticated users (filtered by access)
+ * 
+ * NOTE: This returns ONLY ORG departments (not MyDrive)
+ * MyDrive should be accessed via separate endpoint
  */
 export const getAllDepartments = async (req, res, next) => {
   try {
-    // Validate query params
     const parsedData = getAllDepartmentsSchema.safeParse(req.query);
     validateRequest(parsedData);
 
-    const { page = '1', limit = '10', search = '', sortBy = 'createdAt', order = 'desc', activeOnly } = parsedData.data;
+    const { 
+      page = '1', 
+      limit = '10', 
+      search = '', 
+      sortBy = 'createdAt', 
+      order = 'desc', 
+      activeOnly 
+    } = parsedData.data;
 
     const pageNum = parseInt(page) || 1;
     const limitNum = parseInt(limit) || 10;
     const skip = (pageNum - 1) * limitNum;
     const sortOrder = order === 'asc' ? 1 : -1;
 
-    // Build query
-    let query = {};
+    // Build query based on user role - ONLY ORG departments
+    let query = { ownerType: 'ORG' }; // 🔥 KEY FIX: Only return ORG departments
+    const { role, departments } = req.user;
+    
+    if (role === ROLES.SUPER_ADMIN) {
+      // Super Admin sees all ORG departments
+      // query already has ownerType: 'ORG'
+    } else {
+      // Others see only their assigned ORG departments
+      query._id = { $in: departments };
+    }
     
     if (activeOnly === 'true') {
       query.isActive = true;
@@ -105,16 +117,21 @@ export const getAllDepartments = async (req, res, next) => {
       ];
     }
 
-    // Get data
-    const [totalCount, departments] = await Promise.all([
+    // Get data with .lean() for plain objects
+    const [totalCount, departmentsData] = await Promise.all([
       DepartmentModel.countDocuments(query),
       DepartmentModel.find(query)
         .sort({ [sortBy]: sortOrder })
         .skip(skip)
         .limit(limitNum)
-        .populate('createdBy', 'username email name')
-        .populate('updatedBy', 'username email name')
+        .populate('createdBy', 'username email')
+        .populate('updatedBy', 'username email')
+        .populate('ownerId', 'username email')
+        .lean() // ✅ Convert to plain objects
     ]);
+
+    // 🔐 Attach actions based on user role
+    const departmentsWithActions = attachDepartmentActionsBulk(departmentsData, req.user);
 
     res.status(200).json({
       success: true,
@@ -122,7 +139,7 @@ export const getAllDepartments = async (req, res, next) => {
       page: pageNum,
       limit: limitNum,
       totalPages: Math.ceil(totalCount / limitNum),
-      data: departments
+      data: departmentsWithActions
     });
   } catch (error) {
     next(error);
@@ -132,26 +149,57 @@ export const getAllDepartments = async (req, res, next) => {
 /**
  * Get department by ID
  * Route: GET /api/departments/:id
- * Access: Private
- * Params:
- *   - id: ObjectId (required) - Department ID
- * Response: { success: true, data: department }
+ * Access: Private - All authenticated users (with access check)
  */
 export const getDepartmentById = async (req, res, next) => {
   try {
-    // Validate params
     const parsedData = getDepartmentByIdSchema.safeParse(req.params);
     validateRequest(parsedData);
 
     const { id } = parsedData.data;
-    const sanitizedId = sanitizeAndValidateId(id, 'Department ID');
 
-    const department = await DepartmentModel.findById(sanitizedId)
-      .populate('createdBy', 'name email')
-      .populate('updatedBy', 'name email');
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw createHttpError(400, 'Invalid department ID format');
+    }
+
+    const departmentId = new mongoose.Types.ObjectId(id);
+
+    const department = await DepartmentModel.findById(departmentId)
+      .populate('createdBy', 'username email')
+      .populate('updatedBy', 'username email')
+      .populate('ownerId', 'username email');
 
     if (!department) {
       throw createHttpError(404, 'Department not found');
+    }
+
+    // Check access
+    const { role, departments, myDriveDepartmentId } = req.user;
+    
+    let hasAccess = false;
+    
+    // 🔥 MyDrive Check FIRST - Even Super Admin cannot access other's MyDrive
+    if (department.ownerType === 'USER') {
+      // MyDrive: ONLY the owner can access
+      const myDriveId = myDriveDepartmentId?._id || myDriveDepartmentId;
+      hasAccess = myDriveId && 
+                  myDriveId.toString() === departmentId.toString();
+    } else if (role === ROLES.SUPER_ADMIN) {
+      // Super Admin can access all ORG departments
+      hasAccess = true;
+    } else {
+      // For ORG departments, check if in assigned list
+      hasAccess = departments.some(dept => {
+        const deptId = dept._id || dept;
+        return deptId.toString() === departmentId.toString();
+      });
+    }
+    
+    if (!hasAccess) {
+      throw createHttpError(
+        403, 
+        'Access denied. You do not have access to this department'
+      );
     }
 
     res.status(200).json({
@@ -165,23 +213,14 @@ export const getDepartmentById = async (req, res, next) => {
 
 /**
  * Update department
- * Route: PUT /api/departments/:id
- * Access: Private
- * Params:
- *   - id: ObjectId (required) - Department ID
- * Body:
- *   - name: string (optional) - New department name
- *   - description: string (optional) - New description
- *   - isActive: boolean (optional) - Active status
- * Response: { success: true, message, data: department }
+ * Route: PATCH /api/departments/:id
+ * Access: Private - Super Admin, Admin, Dept Owner (via route middleware)
  */
 export const updateDepartment = async (req, res, next) => {
   try {
-    // Validate params
     const paramsData = getDepartmentByIdSchema.safeParse(req.params);
     validateRequest(paramsData);
 
-    // Validate body
     const bodyData = updateDepartmentSchema.safeParse(req.body);
     validateRequest(bodyData);
 
@@ -189,12 +228,43 @@ export const updateDepartment = async (req, res, next) => {
     const { name, description, isActive } = bodyData.data;
     const updatedBy = req.user.id;
 
-    const sanitizedId = sanitizeAndValidateId(id, 'Department ID');
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw createHttpError(400, 'Invalid department ID format');
+    }
 
-    const department = await DepartmentModel.findById(sanitizedId);
+    const departmentId = new mongoose.Types.ObjectId(id);
+
+    const department = await DepartmentModel.findById(departmentId);
     
     if (!department) {
       throw createHttpError(404, 'Department not found');
+    }
+
+    // Cannot update MyDrive departments
+    if (department.ownerType === 'USER') {
+      throw createHttpError(403, 'Cannot update MyDrive departments');
+    }
+
+    // Verify user has access to this department
+    const { role, departments } = req.user;
+    
+    if (role !== ROLES.SUPER_ADMIN) {
+      // 🔥 FIX: Handle both populated and unpopulated departments
+      const hasAccess = departments.some(dept => {
+        // If dept is an object (populated)
+        if (dept._id) {
+          return dept._id.toString() === departmentId.toString();
+        }
+        // If dept is just an ObjectId
+        return dept.toString() === departmentId.toString();
+      });
+      
+      if (!hasAccess) {
+        // 🔥 DEBUG: Log to see what's happening
+        console.log('User departments:', departments.map(d => d._id || d));
+        console.log('Trying to access department:', departmentId.toString());
+        throw createHttpError(403, 'Access denied. You cannot update this department');
+      }
     }
 
     // Check duplicate name if updating
@@ -202,7 +272,8 @@ export const updateDepartment = async (req, res, next) => {
       const sanitizedName = sanitizeInputWithXSS(name);
       const duplicate = await DepartmentModel.findOne({
         name: { $regex: new RegExp(`^${sanitizedName}$`, 'i') },
-        _id: { $ne: sanitizedId }
+        ownerType: 'ORG',
+        _id: { $ne: departmentId }
       });
 
       if (duplicate) {
@@ -210,13 +281,24 @@ export const updateDepartment = async (req, res, next) => {
       }
 
       department.name = sanitizedName;
-      department.buildPath();
+      if (department.buildPath) {
+        department.buildPath();
+      }
     }
 
     if (description !== undefined) {
       department.description = sanitizeInputWithXSS(description);
     }
-    if (isActive !== undefined) department.isActive = isActive;
+    
+    // 🔥 FIX: Only SUPER_ADMIN can change isActive status
+    if (isActive !== undefined) {
+      if (role === ROLES.SUPER_ADMIN) {
+        department.isActive = isActive;
+      } else {
+        throw createHttpError(403, 'Only Super Admin can change department status');
+      }
+    }
+    
     department.updatedBy = updatedBy;
 
     await department.save();
@@ -234,10 +316,7 @@ export const updateDepartment = async (req, res, next) => {
 /**
  * Delete department permanently
  * Route: DELETE /api/departments/:id
- * Access: Private (Admin only)
- * Params:
- *   - id: ObjectId (required) - Department ID
- * Response: { success: true, message }
+ * Access: Private - Super Admin only (via route middleware)
  */
 export const deleteDepartment = async (req, res, next) => {
   try {
@@ -245,13 +324,25 @@ export const deleteDepartment = async (req, res, next) => {
     validateRequest(parsedData);
 
     const { id } = parsedData.data;
-    const sanitizedId = sanitizeAndValidateId(id, 'Department ID');
 
-    const department = await DepartmentModel.findByIdAndDelete(sanitizedId);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw createHttpError(400, 'Invalid department ID format');
+    }
+
+    const departmentId = new mongoose.Types.ObjectId(id);
+
+    const department = await DepartmentModel.findById(departmentId);
 
     if (!department) {
       throw createHttpError(404, 'Department not found');
     }
+
+    // Cannot delete MyDrive departments
+    if (department.ownerType === 'USER') {
+      throw createHttpError(403, 'Cannot delete MyDrive departments');
+    }
+
+    await DepartmentModel.findByIdAndDelete(departmentId);
 
     res.status(200).json({
       success: true,
@@ -265,10 +356,7 @@ export const deleteDepartment = async (req, res, next) => {
 /**
  * Deactivate department
  * Route: PATCH /api/departments/:id/deactivate
- * Access: Private
- * Params:
- *   - id: ObjectId (required) - Department ID
- * Response: { success: true, message, data: department }
+ * Access: Private - Super Admin, Admin (via route middleware)
  */
 export const deactivateDepartment = async (req, res, next) => {
   try {
@@ -276,13 +364,36 @@ export const deactivateDepartment = async (req, res, next) => {
     validateRequest(parsedData);
 
     const { id } = parsedData.data;
-    const sanitizedId = sanitizeAndValidateId(id, 'Department ID');
     const updatedBy = req.user.id;
 
-    const department = await DepartmentModel.findById(sanitizedId);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw createHttpError(400, 'Invalid department ID format');
+    }
+
+    const departmentId = new mongoose.Types.ObjectId(id);
+
+    const department = await DepartmentModel.findById(departmentId);
 
     if (!department) {
       throw createHttpError(404, 'Department not found');
+    }
+
+    // Cannot deactivate MyDrive
+    if (department.ownerType === 'USER') {
+      throw createHttpError(403, 'Cannot deactivate MyDrive departments');
+    }
+
+    // Verify access for non-Super Admins
+    const { role, departments } = req.user;
+    
+    if (role !== ROLES.SUPER_ADMIN) {
+      const hasAccess = departments.some(
+        deptId => deptId.toString() === departmentId.toString()
+      );
+      
+      if (!hasAccess) {
+        throw createHttpError(403, 'Access denied');
+      }
     }
 
     department.isActive = false;
@@ -302,10 +413,7 @@ export const deactivateDepartment = async (req, res, next) => {
 /**
  * Activate department
  * Route: PATCH /api/departments/:id/activate
- * Access: Private
- * Params:
- *   - id: ObjectId (required) - Department ID
- * Response: { success: true, message, data: department }
+ * Access: Private - Super Admin, Admin (via route middleware)
  */
 export const activateDepartment = async (req, res, next) => {
   try {
@@ -313,13 +421,31 @@ export const activateDepartment = async (req, res, next) => {
     validateRequest(parsedData);
 
     const { id } = parsedData.data;
-    const sanitizedId = sanitizeAndValidateId(id, 'Department ID');
     const updatedBy = req.user.id;
 
-    const department = await DepartmentModel.findById(sanitizedId);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw createHttpError(400, 'Invalid department ID format');
+    }
+
+    const departmentId = new mongoose.Types.ObjectId(id);
+
+    const department = await DepartmentModel.findById(departmentId);
 
     if (!department) {
       throw createHttpError(404, 'Department not found');
+    }
+
+    // Verify access for non-Super Admins
+    const { role, departments } = req.user;
+    
+    if (role !== ROLES.SUPER_ADMIN) {
+      const hasAccess = departments.some(
+        deptId => deptId.toString() === departmentId.toString()
+      );
+      
+      if (!hasAccess) {
+        throw createHttpError(403, 'Access denied');
+      }
     }
 
     department.isActive = true;
@@ -330,130 +456,6 @@ export const activateDepartment = async (req, res, next) => {
       success: true,
       message: 'Department activated successfully',
       data: department
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Update department statistics
- * Route: PATCH /api/departments/:id/stats
- * Access: Private
- * Params:
- *   - id: ObjectId (required) - Department ID
- * Response: { success: true, message, data: stats }
- * Note: Recalculates folder count, document count, and total size
- */
-export const updateDepartmentStats = async (req, res, next) => {
-  try {
-    const parsedData = getDepartmentByIdSchema.safeParse(req.params);
-    validateRequest(parsedData);
-
-    const { id } = parsedData.data;
-    const sanitizedId = sanitizeAndValidateId(id, 'Department ID');
-
-    const department = await DepartmentModel.findById(sanitizedId);
-
-    if (!department) {
-      throw createHttpError(404, 'Department not found');
-    }
-
-    const stats = await department.updateStats();
-
-    res.status(200).json({
-      success: true,
-      message: 'Department statistics updated successfully',
-      data: stats
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Get department by name
- * Route: GET /api/departments/name/:name
- * Access: Private
- * Params:
- *   - name: string (required) - Department name
- * Response: { success: true, data: department }
- */
-export const getDepartmentByName = async (req, res, next) => {
-  try {
-    const parsedData = getDepartmentByNameSchema.safeParse(req.params);
-    validateRequest(parsedData);
-
-    const { name } = parsedData.data;
-    const sanitizedName = sanitizeInputWithXSS(name);
-
-    const department = await DepartmentModel.getByName(sanitizedName);
-
-    if (!department) {
-      throw createHttpError(404, 'Department not found');
-    }
-
-    res.status(200).json({
-      success: true,
-      data: department
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Get department hierarchy (all items within department)
- * Route: GET /api/departments/:id/hierarchy
- * Access: Private
- * Params:
- *   - id: ObjectId (required) - Department ID
- * Query:
- *   - depth: number (optional) - Maximum depth level to fetch
- * Response: { success: true, data: { department, children: [items] } }
- */
-export const getDepartmentHierarchy = async (req, res, next) => {
-  try {
-    const paramsData = getDepartmentByIdSchema.safeParse(req.params);
-    validateRequest(paramsData);
-
-    const queryData = getDepartmentHierarchySchema.safeParse(req.query);
-    validateRequest(queryData);
-
-    const { id } = paramsData.data;
-    const { depth } = queryData.data;
-    
-    const sanitizedId = sanitizeAndValidateId(id, 'Department ID');
-
-    const department = await DepartmentModel.findById(sanitizedId);
-
-    if (!department) {
-      throw createHttpError(404, 'Department not found');
-    }
-
-    const Item = mongoose.model('Item');
-    let query = {
-      path: new RegExp(`^${department.path}/`),
-      isDeleted: false
-    };
-
-    // Apply depth filter
-    if (depth) {
-      const maxDepth = parseInt(depth);
-      const pathDepth = department.path.split('/').length;
-      query.$where = function() {
-        return this.path.split('/').length <= pathDepth + maxDepth;
-      };
-    }
-
-    const children = await Item.find(query).sort({ path: 1 });
-
-    res.status(200).json({
-      success: true,
-      data: {
-        department,
-        children
-      }
     });
   } catch (error) {
     next(error);

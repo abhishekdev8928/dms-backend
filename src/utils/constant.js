@@ -1,4 +1,10 @@
-
+export const ROLES = {
+  SUPER_ADMIN: "SUPER_ADMIN",
+  ADMIN: "ADMIN",
+  DEPT_OWNER: "DEPT_OWNER",
+  FOLDER_MANAGER: "FOLDER_MANAGER",
+  USER: "USER",
+};
 
 export const FILE_FORMAT_GROUPS = {
  

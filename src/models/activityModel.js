@@ -113,9 +113,10 @@ const activityLogSchema = new mongoose.Schema({
     'FOLDER_DELETED',
     'FOLDER_RESTORED',
     'ITEMS_RESTORED',
-    'ITEMS_PERMANENTLY_DELETED',     // ✅ ADD THIS
-    'FILE_PERMANENTLY_DELETED',      // ✅ ADD THIS
-    'FOLDER_PERMANENTLY_DELETED'     // ✅ ADD THIS
+    'ITEMS_PERMANENTLY_DELETED',    
+    'FILE_PERMANENTLY_DELETED',      
+    'FOLDER_PERMANENTLY_DELETED' ,    
+     'FOLDER_SHARED'
   ],
   index: true
 },
@@ -646,7 +647,7 @@ activityLogSchema.statics.logFileDelete = async function(userId, file, userInfo)
  */
 activityLogSchema.statics.logFolderCreate = async function(userId, folder, parentId, userInfo) {
   try {
-    if (!userInfo || !userInfo.name || !userInfo.email) {
+    if (!userInfo ||  !userInfo.email) {
       throw new Error('userInfo with name and email is required');
     }
 
@@ -677,6 +678,47 @@ activityLogSchema.statics.logFolderCreate = async function(userId, folder, paren
     console.error('Error logging folder create:', error);
     throw error;
   }
+};
+/**
+ * Log folder sharing
+ */
+activityLogSchema.statics.logFolderShare = async function (
+  userId,
+  folder,
+  sharedWith,
+  userInfo
+) {
+  const ancestors = await getAncestorChain(folder.parent_id);
+  const parentFolder = await getParentFolderSnapshot(folder.parent_id);
+  const fullPath = buildFullPath(ancestors, folder.name);
+
+  return this.create({
+    userId: userId.toString(),
+    userSnapshot: {
+      id: userId.toString(),
+      name: userInfo?.name,
+      email: userInfo?.email,
+      avatar: userInfo?.avatar || null
+    },
+    action: 'FOLDER_SHARED',
+    targetType: 'folder',
+    target: {
+      id: folder._id.toString(),
+      folderName: folder.name,
+      folderPath: fullPath
+    },
+    parentFolder,
+    ancestors,
+    fullPath,
+    bulkOperation: {
+      itemCount: sharedWith.length,
+      items: sharedWith.map(subject => ({
+        id: subject.subjectId,
+        name: subject.subjectName,
+        type: subject.subjectType
+      }))
+    }
+  });
 };
 
 /**

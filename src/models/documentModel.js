@@ -4,7 +4,7 @@ import {
   findGroupByMimeType,
   validateFile,
   areExtensionsEquivalent
-} from '../utils/constant.js'; // Adjust path as needed
+} from '../utils/constant.js';
 
 const documentSchema = new mongoose.Schema({
   name: {
@@ -18,44 +18,39 @@ const documentSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Original filename is required']
   },
-  visibility: {
-  type: String,
-  enum: ['private', 'public', 'restricted'],
-  default: 'private',
-  lowercase: true
-},
 
+  // 🔥 Resource type identifier - ALWAYS 'document'
   type: {
     type: String,
-    required: [true, 'Type is required'],
-    enum: [
-      'pdf',
-      'document',
-      'spreadsheet',
-      'presentation',
-      'image',
-      'video',
-      'audio',
-      'zip',
-      'archive',
-      'code',
-      'other'
-    ],
+    default: 'document',
+    enum: ['document'],
+    immutable: true
+  },
+
+  // 🔥 File type based on extension/mime (no enum - dynamic)
+  fileType: {
+    type: String,
+    required: [true, 'File type is required'],
     lowercase: true
   },
 
-  parent_id: {
+  // 🔥 Parent reference
+  parentId: {
     type: mongoose.Schema.Types.ObjectId,
-    required: [true, 'Parent folder ID is required']
+    required: [true, 'Parent folder ID is required'],
+    index: true
   },
 
-  starred: {
-    type: Boolean,
-    default: false
+  // 🔥 Department reference
+  departmentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Department',
+    index: true
   },
 
   path: {
-    type: String
+    type: String,
+    index: true
   },
 
   fileUrl: {
@@ -105,10 +100,11 @@ const documentSchema = new mongoose.Schema({
     maxlength: [50, 'Tag cannot exceed 50 characters']
   }],
 
-  // 🔥 Deletion Tracking
+  // Deletion Tracking
   isDeleted: {
     type: Boolean,
-    default: false
+    default: false,
+    index: true
   },
 
   deletedAt: {
@@ -140,9 +136,9 @@ const documentSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-
 // ✅ Indexes
-documentSchema.index({ parent_id: 1, isDeleted: 1 });
+documentSchema.index({ parentId: 1, isDeleted: 1 });
+documentSchema.index({ departmentId: 1, isDeleted: 1 });
 documentSchema.index({ tags: 1 });
 documentSchema.index({ createdAt: -1 });
 documentSchema.index({ updatedAt: -1 });
@@ -150,58 +146,44 @@ documentSchema.index({ extension: 1 });
 documentSchema.index({ mimeType: 1 });
 documentSchema.index({ name: "text", description: "text", path: "text" });
 
-// Helper method to determine type from MIME type
-documentSchema.statics.getTypeFromMimeType = function (mimeType, extension) {
-  const mimeTypeMap = {
-    'application/pdf': 'pdf',
-    'application/msword': 'document',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'document',
-    'text/plain': 'document',
-    'application/rtf': 'document',
-    'application/vnd.ms-excel': 'spreadsheet',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'spreadsheet',
-    'text/csv': 'spreadsheet',
-    'application/vnd.ms-powerpoint': 'presentation',
-    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'presentation',
-
-    // image types
-    'image/jpeg': 'image',
-    'image/jpg': 'image',
-    'image/png': 'image',
-    'image/gif': 'image',
-    'image/webp': 'image',
-    'image/svg+xml': 'image',
-    'image/bmp': 'image',
-    'image/tiff': 'image',
-
-    // zip types
-    'application/zip': 'zip',
-    'application/x-zip-compressed': 'zip',
-    'application/x-rar-compressed': 'zip',
-    'application/x-7z-compressed': 'zip',
-    'application/gzip': 'zip',
-    'application/x-tar': 'zip'
-  };
-
-  // 1️⃣ Check MIME type FIRST (PNG → image)
-  if (mimeType && mimeTypeMap[mimeType]) {
-    return mimeTypeMap[mimeType];
-  }
-
-  // 2️⃣ If MIME fails, fallback to extension
-  if (extension) {
-    const ext = extension.toLowerCase().replace('.', '');
-
-    const zipExtensions = ['zip', 'rar', '7z', 'gz', 'tar'];
-    if (zipExtensions.includes(ext)) return 'zip';
-
-    const imageExtensions = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'bmp', 'tiff', 'webp'];
-    if (imageExtensions.includes(ext)) return 'image';
-  }
-
-  return 'other';
+// 🔥 Helper method to determine fileType from extension using constant groups
+documentSchema.statics.getFileTypeFromExtension = function (extension) {
+  const ext = extension.startsWith('.') ? extension : `.${extension}`;
+  const group = findGroupByExtension(ext);
+  
+  if (!group) return 'other';
+  
+  // ✅ Use group.category instead of group.name
+  return group.category.toLowerCase();
 };
 
+// 🔥 Helper method to determine fileType from MIME type using constant groups
+documentSchema.statics.getFileTypeFromMimeType = function (mimeType) {
+  if (!mimeType) return 'other';
+  
+  const group = findGroupByMimeType(mimeType);
+  
+  if (!group) return 'other';
+  
+  // ✅ Use group.category instead of group.name
+  return group.category.toLowerCase();
+};
+
+// 🔥 Combined method - try MIME first, then extension
+documentSchema.statics.determineFileType = function (mimeType, extension) {
+  // Try MIME type first
+  if (mimeType) {
+    const typeFromMime = this.getFileTypeFromMimeType(mimeType);
+    if (typeFromMime !== 'other') return typeFromMime;
+  }
+  
+  // Fallback to extension
+  if (extension) {
+    return this.getFileTypeFromExtension(extension);
+  }
+  
+  return 'other';
+};
 
 // Virtuals
 documentSchema.virtual('sizeFormatted').get(function () {
@@ -214,25 +196,11 @@ documentSchema.virtual('sizeFormatted').get(function () {
 });
 
 documentSchema.virtual('fileCategory').get(function () {
-  const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'webp'];
-  const docExts = ['pdf', 'doc', 'docx', 'txt', 'rtf', 'odt'];
-  const spreadsheetExts = ['xls', 'xlsx', 'csv', 'ods'];
-  const presentationExts = ['ppt', 'pptx', 'odp'];
-  const videoExts = ['mp4', 'avi', 'mov', 'wmv', 'flv', 'webm'];
-  const audioExts = ['mp3', 'wav', 'ogg', 'flac', 'm4a'];
-  const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz'];
-
-  const ext = this.extension.toLowerCase();
-
-  if (imageExts.includes(ext)) return 'image';
-  if (docExts.includes(ext)) return 'document';
-  if (spreadsheetExts.includes(ext)) return 'spreadsheet';
-  if (presentationExts.includes(ext)) return 'presentation';
-  if (videoExts.includes(ext)) return 'video';
-  if (audioExts.includes(ext)) return 'audio';
-  if (archiveExts.includes(ext)) return 'archive';
-
-  return 'other';
+  // Use the constant groups to determine category
+  const ext = this.extension.startsWith('.') ? this.extension : `.${this.extension}`;
+  const group = findGroupByExtension(ext);
+  // ✅ Use group.category instead of group.name
+  return group ? group.category.toLowerCase() : 'other';
 });
 
 documentSchema.virtual('displayName').get(function () {
@@ -247,11 +215,11 @@ documentSchema.methods.buildPath = async function () {
   const FolderModel = mongoose.model('Folder');
   const DepartmentModel = mongoose.model('Department');
 
-  let parent = await FolderModel.findById(this.parent_id);
+  let parent = await FolderModel.findById(this.parentId);
   let parentType = 'Folder';
 
   if (!parent) {
-    parent = await DepartmentModel.findById(this.parent_id);
+    parent = await DepartmentModel.findById(this.parentId);
     parentType = 'Department';
   }
 
@@ -263,11 +231,7 @@ documentSchema.methods.buildPath = async function () {
     ? this.name
     : `${this.name}.${this.extension}`;
 
-  if (parentType === 'Department') {
-    this.path = `/${parent.name}/${fileName}`;
-  } else {
-    this.path = `${parent.path}/${fileName}`;
-  }
+  this.path = `${parent.path}/${fileName}`;
 
   return this.path;
 };
@@ -279,16 +243,15 @@ documentSchema.methods.getBreadcrumbs = function () {
 
 documentSchema.methods.getDepartment = async function () {
   const DepartmentModel = mongoose.model('Department');
-  const departmentName = this.path.split('/')[1];
-  return DepartmentModel.findOne({ name: departmentName });
+  return DepartmentModel.findById(this.departmentId);
 };
 
 documentSchema.methods.getParentFolder = async function () {
   const FolderModel = mongoose.model('Folder');
-  return FolderModel.findById(this.parent_id);
+  return FolderModel.findById(this.parentId);
 };
 
-// ✅ IMPROVED: Re-upload method using constant file format groups
+// 🔥 Re-upload method using constant file format groups
 documentSchema.methods.reUpload = async function (
   newFileData,
   changeDescription,
@@ -306,16 +269,14 @@ documentSchema.methods.reUpload = async function (
     ? newFileData.extension.toLowerCase()
     : `.${newFileData.extension.toLowerCase()}`;
 
-  // 2️⃣ Validate using format groups from constants
+  // 2️⃣ Validate using format groups from constants (allows jpg→jpeg, png→jpg, etc.)
   if (!areExtensionsEquivalent(currentExtension, newExtension)) {
     const currentGroup = findGroupByExtension(currentExtension);
     const newGroup = findGroupByExtension(newExtension);
 
-   throw new Error(
-  `File types must match.`
-);
-
-
+    throw new Error(
+      `File format mismatch. Current: ${currentGroup?.name || 'unknown'}, New: ${newGroup?.name || 'unknown'}`
+    );
   }
 
   // 3️⃣ Validate the new file completely
@@ -324,24 +285,22 @@ documentSchema.methods.reUpload = async function (
     throw new Error(`File validation failed: ${validation.reason}`);
   }
 
-  // 4️⃣ Determine file type
-  const fileType = DocumentModel.getTypeFromMimeType(
+  // 4️⃣ Determine file type using constant groups
+  const fileType = DocumentModel.determineFileType(
     newFileData.mimeType,
     newExtension
   );
 
-  // 5️⃣ Create a new version
+  // 5️⃣ Create a new version - ✅ INCLUDE type: 'document'
   const newVersion = await DocumentVersionModel.createNewVersion(
     this._id,
     {
       ...newFileData,
-      // Keep the display name frozen
       name: this.name,
-      // Store the actual uploaded filename
       originalName: newFileData.originalName,
-      type: fileType,
-      // Ensure extension has proper format
-      extension: newExtension.replace('.', '')
+      fileType: fileType,
+      extension: newExtension.replace('.', ''),
+      type: 'document' // ✅ FIXED: Always pass type as 'document'
     },
     changeDescription || "File re-uploaded",
     userId
@@ -351,21 +310,18 @@ documentSchema.methods.reUpload = async function (
   this.fileUrl = newFileData.fileUrl;
   this.size = newFileData.size;
   this.mimeType = newFileData.mimeType;
-  this.extension = newExtension.replace('.', ''); // Store without dot
+  this.extension = newExtension.replace('.', '');
+  this.fileType = fileType;
   this.version = newVersion.versionNumber;
   this.currentVersionId = newVersion._id;
   this.updatedBy = userId;
-
-  // ❌ Do NOT change:
-  // this.name (frozen - user-facing display name)
-  // this.originalName (keeps first upload's original filename)
 
   await this.save();
 
   return newVersion;
 };
 
-// ✅ NEW: Rename method - only updates name, keeps file metadata
+// Rename method
 documentSchema.methods.rename = async function (
   newName,
   userId,
@@ -373,15 +329,12 @@ documentSchema.methods.rename = async function (
 ) {
   const DocumentVersionModel = mongoose.model('DocumentVersion');
 
-  // Update Document name
   this.name = newName;
   this.updatedBy = userId;
 
-  // Rebuild path
   await this.buildPath();
   await this.save({ session });
 
-  // Update ONLY the latest version's name
   await DocumentVersionModel.updateLatestVersionName(
     this._id,
     newName,
@@ -407,7 +360,7 @@ documentSchema.methods.getVersion = async function (versionNumber) {
   });
 };
 
-// ✅ IMPROVED: Revert to version method
+// Revert to version method
 documentSchema.methods.revertToVersion = async function (targetVersionNumber, userId) {
   const DocumentVersion = mongoose.model("DocumentVersion");
 
@@ -419,7 +372,7 @@ documentSchema.methods.revertToVersion = async function (targetVersionNumber, us
 
   if (!oldVersion) throw new Error("Version not found");
 
-  // 2. Validate that old version's format is still compatible
+  // 2. Validate that old version's format is still compatible using constant groups
   const currentExt = this.extension.startsWith('.') ? this.extension : `.${this.extension}`;
   const oldExt = oldVersion.extension.startsWith('.') ? oldVersion.extension : `.${oldVersion.extension}`;
 
@@ -429,7 +382,7 @@ documentSchema.methods.revertToVersion = async function (targetVersionNumber, us
     );
   }
 
-  // 3. Create NEW version based on old version
+  // 3. Create NEW version based on old version - ✅ INCLUDE type: 'document'
   const newVersion = await DocumentVersion.createNewVersion(
     this._id,
     {
@@ -438,8 +391,9 @@ documentSchema.methods.revertToVersion = async function (targetVersionNumber, us
       mimeType: oldVersion.mimeType,
       extension: oldVersion.extension,
       size: oldVersion.size,
-      type: oldVersion.type,
-      fileUrl: oldVersion.fileUrl
+      fileType: oldVersion.fileType,
+      fileUrl: oldVersion.fileUrl,
+      type: 'document' // ✅ FIXED: Always pass type as 'document'
     },
     `Restored from version ${targetVersionNumber}`,
     userId
@@ -452,6 +406,7 @@ documentSchema.methods.revertToVersion = async function (targetVersionNumber, us
   this.extension = newVersion.extension;
   this.size = newVersion.size;
   this.fileUrl = newVersion.fileUrl;
+  this.fileType = newVersion.fileType;
   this.version = newVersion.versionNumber;
   this.currentVersionId = newVersion._id;
   this.updatedBy = userId;
@@ -463,27 +418,30 @@ documentSchema.methods.revertToVersion = async function (targetVersionNumber, us
 
 documentSchema.methods.moveTo = async function (newParentId, session = null) {
   const FolderModel = mongoose.model('Folder');
+  const DepartmentModel = mongoose.model('Department');
 
-  const folder = await FolderModel.findById(newParentId).session(session);
-  if (!folder) {
-    throw new Error('Target folder not found');
+  let newParent = await FolderModel.findById(newParentId).session(session);
+
+  if (!newParent) {
+    newParent = await DepartmentModel.findById(newParentId).session(session);
   }
 
-  const oldDepartment = await this.getDepartment();
-  const newDepartmentName = folder.path.split('/')[1];
-  const DepartmentModel = mongoose.model('Department');
-  const newDepartment = await DepartmentModel.findOne({ name: newDepartmentName }).session(session);
+  if (!newParent) {
+    throw new Error('New parent not found');
+  }
 
-  this.parent_id = newParentId;
+  this.parentId = newParentId;
+
+  // Update departmentId if moving to different department
+  if (
+    newParent.departmentId &&
+    newParent.departmentId.toString() !== this.departmentId.toString()
+  ) {
+    this.departmentId = newParent.departmentId;
+  }
+
   await this.buildPath();
   await this.save({ session });
-
-  if (oldDepartment && newDepartment && !oldDepartment._id.equals(newDepartment._id)) {
-    await oldDepartment.updateStats();
-    await newDepartment.updateStats();
-  } else if (oldDepartment) {
-    await oldDepartment.updateStats();
-  }
 
   return this;
 };
@@ -518,22 +476,21 @@ documentSchema.methods.removeTags = async function (tagsToRemove, session = null
 
 // Static methods
 documentSchema.statics.findByFolder = function (folderId, includeDeleted = false) {
-  const query = { parent_id: folderId };
+  const query = { parentId: folderId };
   if (!includeDeleted) {
     query.isDeleted = false;
   }
   return this.find(query).sort({ name: 1 });
 };
 
-documentSchema.statics.searchByName = function (searchTerm, departmentName = null, options = {}) {
+documentSchema.statics.searchByName = function (searchTerm, departmentId = null, options = {}) {
   const query = {
     $text: { $search: searchTerm },
     isDeleted: false
   };
 
-  if (departmentName) {
-    const escapedName = departmentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    query.path = new RegExp(`^/${escapedName}/`);
+  if (departmentId) {
+    query.departmentId = departmentId;
   }
 
   return this.find(query, { score: { $meta: 'textScore' } })
@@ -548,7 +505,18 @@ documentSchema.statics.findByPath = function (fullPath) {
   });
 };
 
-// ✅ Pre-save middleware
+documentSchema.statics.findByDepartment = function (
+  departmentId,
+  includeDeleted = false
+) {
+  const query = { departmentId };
+  if (!includeDeleted) {
+    query.isDeleted = false;
+  }
+  return this.find(query).sort({ path: 1 });
+};
+
+// Pre-save middleware
 documentSchema.pre('save', async function (next) {
   if (this.isNew && !this.extension && this.originalName) {
     const match = this.originalName.match(/\.([^.]+)$/);
@@ -561,16 +529,45 @@ documentSchema.pre('save', async function (next) {
     this.tags = [...new Set(this.tags.map(tag => tag.toLowerCase().trim()))];
   }
 
-  // Only rebuild path if parent_id changes (move operation)
-  // Name changes are handled by rename() method
-  if (this.isModified('parent_id')) {
+  // 🔥 Auto-set departmentId from parent if not set
+  if (this.isNew && !this.departmentId) {
+    const FolderModel = mongoose.model('Folder');
+    const DepartmentModel = mongoose.model('Department');
+
+    let parent = await FolderModel.findById(this.parentId);
+
+    if (!parent) {
+      parent = await DepartmentModel.findById(this.parentId);
+    }
+
+    if (parent) {
+      if (parent.departmentId) {
+        this.departmentId = parent.departmentId;
+      } else if (parent.ownerType === 'ORG' || parent.ownerType === 'USER') {
+        this.departmentId = parent._id;
+      }
+    }
+    
+    // 🔥 Validate that departmentId was set
+    if (!this.departmentId) {
+      throw new Error('Unable to determine departmentId from parent');
+    }
+  }
+
+  // Auto-set fileType if not set (using constant groups)
+  if (this.isNew && !this.fileType) {
+    this.fileType = this.constructor.determineFileType(this.mimeType, this.extension);
+  }
+
+  // Rebuild path if parentId changes
+  if (this.isModified('parentId')) {
     await this.buildPath();
   }
 
   next();
 });
 
-// Post-save middleware to update department stats
+// Post-save middleware
 documentSchema.post('save', async function (doc) {
   if (this.wasNew || this.isModified('isDeleted') || this.isModified('size')) {
     const department = await this.getDepartment();
@@ -580,7 +577,7 @@ documentSchema.post('save', async function (doc) {
   }
 });
 
-// Post-remove middleware to update department stats
+// Post-remove middleware
 documentSchema.post('remove', async function (doc) {
   const department = await this.getDepartment();
   if (department) {

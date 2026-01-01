@@ -1,82 +1,42 @@
 import mongoose from "mongoose";
-const ACLSchema = new mongoose.Schema(
+
+const accessControlSchema = new mongoose.Schema(
   {
-    type: {
+    resourceType: {
       type: String,
-      enum: ["file", "folder"],
+      enum: ["FOLDER", "DOCUMENT"],
       required: true,
+      uppercase: true,
+      index: true,
     },
-    visibility: {
+    resourceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      index: true,
+    },
+    subjectType: {
       type: String,
-      enum: ["public", "private", "restricted"],
-      default: "private",
+      enum: ["USER", "GROUP"],
       required: true,
+      uppercase: true,
+      index: true,
     },
-    users: [
-      {
-        userId: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: "User",
-          required: true,
-        },
-        permissions: [
-          {
-            type: String,
-            enum: ["view", "upload", "download", "delete", "change_visibility"],
-            required: true,
-          },
-        ],
-        _id: false,
-      },
-    ],
-    roles: [
-      {
-        roleId: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: "Role",
-          required: true,
-        },
-        permissions: [
-          {
-            type: String,
-            enum: ["view", "upload", "download", "delete", "change_visibility"],
-          },
-        ],
-        _id: false,
-      },
-    ],
-    memberBanks: [
-      {
-        memberBankId: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: "MemberBank",
-          required: true,
-        },
-        permissions: [
-          {
-            type: String,
-            enum: ["view", "upload", "download", "delete", "change_visibility"],
-          },
-        ],
-        _id: false,
-      },
-    ],
-    inheritsFromParent: {
-      type: Boolean,
-      default: true,
+    subjectId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      index: true,
     },
-    createdBy: {
+    permissions: [
+      {
+        type: String,
+        enum: ["view", "download", "upload", "delete", "share"],
+        lowercase: true,
+      },
+    ],
+    grantedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
-    },
-    createdAt: {
-      type: Date,
-      default: Date.now,
-    },
-    updatedAt: {
-      type: Date,
-      default: Date.now,
     },
   },
   {
@@ -84,115 +44,140 @@ const ACLSchema = new mongoose.Schema(
   }
 );
 
-// Indexes
-ACLSchema.index({ type: 1 });
-ACLSchema.index({ visibility: 1 });
-ACLSchema.index({ "users.userId": 1 });
-ACLSchema.index({ "roles.roleId": 1 });
-ACLSchema.index({ "memberBanks.memberBankId": 1 });
+// ============================================
+// INDEXES
+// ============================================
+accessControlSchema.index({ resourceType: 1, resourceId: 1 });
+accessControlSchema.index({ subjectType: 1, subjectId: 1 });
+accessControlSchema.index(
+  {
+    resourceType: 1,
+    resourceId: 1,
+    subjectType: 1,
+    subjectId: 1,
+  },
+  { unique: true }
+);
 
-// Methods
-
-// Check permission for user
-ACLSchema.methods.hasPermission = function (userId, requiredPermission) {
-  const userGrant = this.users.find(
-    (u) => u.userId.toString() === userId.toString()
-  );
-  if (userGrant) {
-    return userGrant.permissions.includes(requiredPermission);
-  }
-  return false;
-};
-
-// Add user
-ACLSchema.methods.addUser = function (userId, permissions) {
-  const existingIndex = this.users.findIndex(
-    (u) => u.userId.toString() === userId.toString()
-  );
-
-  if (existingIndex !== -1) {
-    this.users[existingIndex].permissions = permissions;
-  } else {
-    this.users.push({ userId, permissions });
-  }
-
-  this.updatedAt = Date.now();
-  return this.save();
-};
-
-// Remove user
-ACLSchema.methods.removeUser = function (userId) {
-  this.users = this.users.filter(
-    (u) => u.userId.toString() !== userId.toString()
-  );
-  this.updatedAt = Date.now();
-  return this.save();
-};
-
-// Update user permissions
-ACLSchema.methods.updateUserPermissions = function (userId, permissions) {
-  const userGrant = this.users.find(
-    (u) => u.userId.toString() === userId.toString()
-  );
-
-  if (userGrant) {
-    userGrant.permissions = permissions;
-    this.updatedAt = Date.now();
-    return this.save();
-  }
-
-  throw new Error("User not found in ACL");
-};
-
-// Get users with specific permission
-ACLSchema.methods.getUsersWithPermission = function (permission) {
-  return this.users
-    .filter((u) => u.permissions.includes(permission))
-    .map((u) => u.userId);
-};
-
+// ============================================
 // STATIC METHODS
+// ============================================
 
-// Find ACL document by resourceId
-ACLSchema.statics.findByResourceId = function (resourceId, type) {
-  return this.findOne({ _id: resourceId, type });
-};
-
-// Create Private ACL
-ACLSchema.statics.createPrivate = function (resourceId, type, creatorId) {
-  return this.create({
-    _id: resourceId,
-    type,
-    visibility: "private",
-    users: [
-      {
-        userId: creatorId,
-        permissions: [
-          "view",
-          "upload",
-          "download",
-          "delete",
-          "change_visibility",
-        ],
-      },
+/**
+ * Check if user has specific permission on resource
+ */
+accessControlSchema.statics.userHasPermission = async function (
+  resourceType,
+  resourceId,
+  userId,
+  permission,
+  userGroupIds = []
+) {
+  const acls = await this.find({
+    resourceType: resourceType.toUpperCase(),
+    resourceId,
+    $or: [
+      { subjectType: "USER", subjectId: userId },
+      { subjectType: "GROUP", subjectId: { $in: userGroupIds } },
     ],
-    inheritsFromParent: false,
-    createdBy: creatorId,
+  });
+
+  return acls.some((acl) => acl.permissions.includes(permission.toLowerCase()));
+};
+
+/**
+ * Get merged permissions for user (direct + group)
+ */
+accessControlSchema.statics.getUserPermissions = async function (
+  resourceType,
+  resourceId,
+  userId,
+  userGroupIds = []
+) {
+  const acls = await this.find({
+    resourceType: resourceType.toUpperCase(),
+    resourceId,
+    $or: [
+      { subjectType: "USER", subjectId: userId },
+      { subjectType: "GROUP", subjectId: { $in: userGroupIds } },
+    ],
+  });
+
+  const allPermissions = new Set();
+  acls.forEach((acl) => {
+    acl.permissions.forEach((perm) => allPermissions.add(perm));
+  });
+
+  return Array.from(allPermissions);
+};
+
+/**
+ * Grant permission to subject
+ */
+accessControlSchema.statics.grantToSubject = async function (
+  resourceType,
+  resourceId,
+  subjectType,
+  subjectId,
+  permissions,
+  grantedBy
+) {
+  return this.findOneAndUpdate(
+    {
+      resourceType: resourceType.toUpperCase(),
+      resourceId,
+      subjectType: subjectType.toUpperCase(),
+      subjectId,
+    },
+    {
+      permissions: Array.isArray(permissions) ? permissions : [permissions],
+      grantedBy,
+    },
+    {
+      upsert: true,
+      new: true,
+    }
+  );
+};
+
+/**
+ * Revoke access from subject
+ */
+accessControlSchema.statics.revokeFromSubject = async function (
+  resourceType,
+  resourceId,
+  subjectType,
+  subjectId
+) {
+  return this.deleteOne({
+    resourceType: resourceType.toUpperCase(),
+    resourceId,
+    subjectType: subjectType.toUpperCase(),
+    subjectId,
   });
 };
 
-// Create Public ACL
-ACLSchema.statics.createPublic = function (resourceId, type, creatorId) {
-  return this.create({
-    _id: resourceId,
-    type,
-    visibility: "public",
-    users: [],
-    inheritsFromParent: false,
-    createdBy: creatorId,
-  });
+/**
+ * Get all ACL entries for a resource
+ */
+accessControlSchema.statics.findByResource = function (
+  resourceType,
+  resourceId
+) {
+  return this.find({
+    resourceType: resourceType.toUpperCase(),
+    resourceId,
+  }).populate("subjectId grantedBy");
 };
+accessControlSchema.statics.hasAnyACL = async function (resourceType, resourceId) {
+  const count = await this.countDocuments({
+    resourceType: resourceType.toUpperCase(),
+    resourceId,
+  });
+  return count > 0;
+};
+const AccessControlModel =
+  mongoose.models.AccessControl ||
+  mongoose.model("AccessControl", accessControlSchema);
 
-const ACLModel = mongoose.model("ACL", ACLSchema);
-
-export default ACLModel;
+export default AccessControlModel;

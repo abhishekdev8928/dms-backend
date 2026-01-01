@@ -1,7 +1,3 @@
-/**
- * UPDATED DOCUMENT VALIDATION SCHEMA
- * Now uses constants from constant.js file instead of hardcoded values
- */
 
 import { z } from 'zod';
 import mongoose from 'mongoose';
@@ -19,7 +15,7 @@ const objectIdValidator = z.string().refine(
   { message: 'Invalid ObjectId format' }
 );
 
-// ✅ Custom file extension validator using constants
+
 const fileExtensionValidator = z.string()
   .min(1, 'File extension is required')
   .max(10, 'File extension too long')
@@ -100,7 +96,8 @@ export const generatePresignedUrlsSchema = z.object({
 });
 
 /**
- * Schema for creating a new document
+ * ✅ Schema for creating a new document
+ * UPDATED: parent_id → parentId
  */
 export const createDocumentSchema = z.object({
   body: z.object({
@@ -111,7 +108,7 @@ export const createDocumentSchema = z.object({
     originalName: z.string()
       .min(1, 'Original filename is required')
       .max(255, 'Original filename cannot exceed 255 characters'),
-    parent_id: objectIdValidator,
+    parentId: objectIdValidator, // ✅ Changed from parent_id
     fileUrl: z.string()
       .min(1, 'File URL (S3 key) is required')
       .max(500, 'File URL too long'),
@@ -269,7 +266,8 @@ export const findByTagsSchema = z.object({
       .max(500, 'Tags query too long')
       .transform(val => val.split(',').map(t => t.trim()).filter(t => t.length > 0))
       .refine(arr => arr.length > 0, 'At least one tag is required')
-      .refine(arr => arr.length <= 20, 'Maximum 20 tags allowed')
+      .refine(arr => arr.length <= 20, 'Maximum 20 tags allowed'),
+    departmentId: objectIdValidator.optional()
   })
 });
 
@@ -278,8 +276,11 @@ export const findByTagsSchema = z.object({
  */
 export const findByExtensionSchema = z.object({
   params: z.object({
-    ext: fileExtensionValidator
-  })
+    extension: fileExtensionValidator // ✅ Changed from 'ext' to 'extension' for consistency
+  }),
+  query: z.object({
+    departmentId: objectIdValidator.optional()
+  }).optional()
 });
 
 /**
@@ -433,4 +434,146 @@ export const deleteOldVersionsSchema = z.object({
       .optional()
       .default(5)
   })
+});
+
+// ===== CHUNKED UPLOAD VALIDATION SCHEMAS =====
+
+/**
+ * ✅ Schema for initiating chunked upload
+ */
+export const initiateChunkedUploadSchema = z.object({
+  body: z.object({
+    filename: z.string()
+      .min(1, 'Filename is required')
+      .max(255, 'Filename cannot exceed 255 characters')
+      .regex(/^[^<>:"/\\|?*\x00-\x1F]+$/, 'Filename contains invalid characters'),
+    mimeType: mimeTypeValidator,
+    fileSize: z.number()
+      .int('File size must be an integer')
+      .positive('File size must be positive')
+      .min(100 * 1024 * 1024, 'File size must be at least 100MB for chunked upload')
+      .max(5 * 1024 * 1024 * 1024, 'File size cannot exceed 5GB'),
+    parentId: objectIdValidator
+  }).superRefine((data, ctx) => {
+    const ext = data.filename.split('.').pop()?.toLowerCase() || '';
+    const validation = validateFile(`.${ext}`, data.mimeType);
+    
+    if (!validation.valid) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: validation.reason,
+        path: ['filename']
+      });
+    }
+  })
+});
+
+/**
+ * ✅ Schema for uploading a chunk
+ */
+export const uploadChunkSchema = z.object({
+  body: z.object({
+    uploadId: z.string()
+      .min(1, 'Upload ID is required'),
+    key: z.string()
+      .min(1, 'S3 key is required'),
+    partNumber: z.number()
+      .int('Part number must be an integer')
+      .min(1, 'Part number must be at least 1')
+      .max(10000, 'Part number cannot exceed 10000'),
+    body: z.union([
+      z.instanceof(Buffer),
+      z.string() // base64 encoded
+    ])
+  })
+});
+
+/**
+ * ✅ Schema for completing chunked upload
+ */
+export const completeChunkedUploadSchema = z.object({
+  body: z.object({
+    uploadId: z.string()
+      .min(1, 'Upload ID is required'),
+    key: z.string()
+      .min(1, 'S3 key is required'),
+    parts: z.array(
+      z.object({
+        ETag: z.string().min(1, 'ETag is required'),
+        PartNumber: z.number()
+          .int('Part number must be an integer')
+          .min(1, 'Part number must be at least 1')
+          .max(10000, 'Part number cannot exceed 10000')
+      })
+    ).min(1, 'At least one part is required'),
+    name: z.string()
+      .min(1, 'Document name is required')
+      .max(255, 'Document name cannot exceed 255 characters')
+      .trim(),
+    parentId: objectIdValidator,
+    mimeType: mimeTypeValidator.optional(),
+    fileSize: z.number()
+      .int('File size must be an integer')
+      .positive('File size must be positive')
+      .optional(),
+    description: z.string()
+      .max(1000, 'Description cannot exceed 1000 characters')
+      .trim()
+      .optional(),
+    tags: z.array(
+      z.string()
+        .min(1, 'Tag cannot be empty')
+        .max(50, 'Tag cannot exceed 50 characters')
+        .trim()
+        .toLowerCase()
+    ).max(20, 'Maximum 20 tags allowed')
+      .optional()
+  })
+});
+
+/**
+ * ✅ Schema for aborting chunked upload
+ */
+export const abortChunkedUploadSchema = z.object({
+  body: z.object({
+    uploadId: z.string()
+      .min(1, 'Upload ID is required'),
+    key: z.string()
+      .min(1, 'S3 key is required')
+  })
+});
+
+
+
+
+export const shareDocumentSchema = z.object({
+  params: z.object({
+    id: objectIdValidator
+  }),
+  body: z.object({
+    users: z.array(
+      z.object({
+        userId: objectIdValidator,
+        permissions: z.array(
+          z.enum(['view', 'download', 'upload', 'delete', 'share'])
+        ).min(1, 'At least one permission is required')
+      })
+    )
+      .max(50, 'Maximum 50 users can be shared at once')
+      .optional()
+      .default([]),
+    
+    groups: z.array(
+      z.object({
+        groupId: objectIdValidator,
+        permissions: z.array(
+          z.enum(['view', 'download', 'upload', 'delete', 'share'])
+        ).min(1, 'At least one permission is required')
+      })
+    )
+      .max(20, 'Maximum 20 groups can be shared at once')
+      .optional()
+      .default([])
+  })
+  // ✅ Removed the refine check - now empty arrays are allowed
 });

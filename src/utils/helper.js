@@ -159,8 +159,15 @@ export const validateRequest = (parsedData) => {
       field,
       message: flattened.fieldErrors[field]?.[0] || "Invalid value",
     }));
+
     const err = createHttpError(400, "Validation failed");
     err.errors = errors;
     throw err;
   }
+
+  // ✅ IMPORTANT: return validated data
+  return parsedData.data;
 };
+
+
+

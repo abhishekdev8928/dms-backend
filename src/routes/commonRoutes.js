@@ -6,12 +6,8 @@ import { authenticateUser } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// Apply authentication middleware to all routes
 router.use(authenticateUser);
 
-// ==========================================
-// DELETION ROUTES
-// ==========================================
 
 /**
  * @route   DELETE /api/v1/items

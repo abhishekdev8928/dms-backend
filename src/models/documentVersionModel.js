@@ -14,12 +14,23 @@ const documentVersionSchema = new mongoose.Schema(
       required: [true, "Version number is required"],
       min: [1, "Version number must be at least 1"]
     },
-type: {
-  type: String,
-  required: true,
-  index: true
-}
-,
+
+    // 🔥 Resource type identifier - ALWAYS 'document'
+    type: {
+      type: String,
+      required: true,
+      default: 'document',
+      enum: ['document'],
+      index: true
+    },
+
+    // 🔥 File type based on extension/mime (e.g., 'pdf', 'image', 'video', etc.)
+    fileType: {
+      type: String,
+      required: [true, 'File type is required'],
+      lowercase: true
+    },
+
     name: {
       type: String,
       required: [true, "Document name is required"],
@@ -237,17 +248,26 @@ documentVersionSchema.statics.createNewVersion = async function (
   const lastVersion = await this.findOne({ documentId }).sort({ versionNumber: -1 });
   const nextVersionNumber = lastVersion ? lastVersion.versionNumber + 1 : 1;
 
-  // Create the new version
+  // ✅ FIXED: Auto-calculate fileType if not provided
+  let fileType = fileData.fileType;
+  if (!fileType) {
+    const DocumentModel = mongoose.model('Document');
+    fileType = DocumentModel.determineFileType(fileData.mimeType, fileData.extension);
+    console.log("🔥 Auto-calculated fileType:", fileType);
+  }
+
+  // Create the new version - ✅ Include ALL required fields
   const newVersion = await this.create({
     documentId,
     versionNumber: nextVersionNumber,
-    name: fileData.name,             // ✔ Frozen display name
-    originalName: fileData.originalName, // ✔ Uploaded file name
+    name: fileData.name,                    // ✔ Frozen display name
+    originalName: fileData.originalName,    // ✔ Uploaded file name
     mimeType: fileData.mimeType,
     extension: fileData.extension,
     size: fileData.size,
     fileUrl: fileData.fileUrl,
-    type: fileData.type,
+    type: fileData.type || 'document',      // ✅ FIXED: Default to 'document' if not provided
+    fileType: fileType,                     // ✅ FIXED: Use calculated or provided fileType
     isLatest: true,
     createdBy: userId,
     changeDescription

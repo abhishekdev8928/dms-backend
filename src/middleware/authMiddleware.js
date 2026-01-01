@@ -3,11 +3,13 @@ import createHttpError from 'http-errors';
 import UserModel from '../models/userModel.js';
 import { config } from '../config/config.js';
 
+
+// middleware/authMiddleware.js
+
 export const authenticateUser = async (req, res, next) => {
   try {
     let token;
 
-    // Extract Bearer token
     if (req.headers.authorization?.startsWith('Bearer ')) {
       token = req.headers.authorization.split(' ')[1];
     }
@@ -16,24 +18,17 @@ export const authenticateUser = async (req, res, next) => {
       throw createHttpError(401, 'Not authorized. Token missing.');
     }
 
-    // Verify JWT
     const decoded = jwt.verify(token, config.jwtSecret);
 
-    // Fetch user from DB
-    const user = await UserModel.findById(decoded.sub).populate('departments');
+    const user = await UserModel.findById(decoded.sub)
+      .populate('departments')
+      .populate('myDriveDepartmentId');
 
     if (!user || !user.isActive) {
       throw createHttpError(401, 'User not found or inactive.');
     }
 
-    // Attach user info to request
-    req.user = {
-      id: user._id,
-      email: user.email,
-      role: user.role,
-      username:user.username
-    };
-
+    req.user = user;
     next();
 
   } catch (error) {
@@ -53,4 +48,29 @@ export const authenticateUser = async (req, res, next) => {
 
     next(error);
   }
+};
+
+
+/**
+ * 🔐 Generic role-based access middleware
+ * Usage: authorizeRoles('SUPER_ADMIN', 'ADMIN')
+ */
+export const authorizeRoles = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required',
+      });
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: `Access denied. Required roles: ${allowedRoles.join(', ')}`,
+      });
+    }
+
+    next();
+  };
 };

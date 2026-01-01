@@ -1,15 +1,14 @@
-import DocumentModel from "../models/documentModel.js";
+// controller/starredController.js
+
+import createHttpError from "http-errors";
+import StarredModel from "../models/starredModel.js";
 import FolderModel from "../models/folderModel.js";
-import { sanitizeAndValidateId, sanitizeInput, validateRequest } from "../utils/helper.js";
+import DocumentModel from "../models/documentModel.js";
+import { hasPermission, attachActionsBulk } from "../utils/helper/aclHelpers.js";
+import { sanitizeAndValidateId, validateRequest } from "../utils/helper.js";
 import z from "zod";
 
-const toggleStarredSchema = z.object({
-  body: z.object({
-    id: z.string().min(1, "ID is required"),
-    type: z.string().min(1, "Type is required"),
-  }),
-});
-
+// Validation schemas
 const bulkStarredSchema = z.object({
   body: z.object({
     fileIds: z.array(z.string()).optional().default([]),
@@ -19,78 +18,40 @@ const bulkStarredSchema = z.object({
 });
 
 /**
- * Set starred status to true for a single item
- * @route POST /api/v1/starred/add
- * @body { id: string, type: "folder" | "file" }
+ * ============================================
+ * ADD ITEM TO STARRED
+ * ============================================
+ * @route   POST /api/starred/add
+ * @access  Private - Middleware validates 'view' permission
+ * @body    { id: string, type: "folder" | "file" }
+ * @note    req.resource and req.resourceType attached by middleware
  */
 export const addStarred = async (req, res, next) => {
   try {
-    const parsed = toggleStarredSchema.safeParse({ body: req.body });
-    console.log(parsed);
-    validateRequest(parsed);
+    const user = req.user;
+    const resource = req.resource; // Attached by middleware
+    const resourceType = req.resourceType; // Attached by middleware
+    const { type } = req.body;
 
-    const { id, type } = parsed.data.body;
-    
-    // Sanitize inputs
-    const sanitizedId = sanitizeAndValidateId(id, "Item ID");
-    const sanitizedType = sanitizeInput(type);
-
-    let item;
-    let Model;
-
-    // Get the appropriate model
-    if (sanitizedType === "folder") {
-      Model = FolderModel;
-    } else {
-      Model = DocumentModel;
-    }
-
-    // Find the item
-    item = await Model.findById(sanitizedId);
-
-    if (!item) {
-      return res.status(404).json({
-        success: false,
-        message: `${sanitizedType === "folder" ? "Folder" : "File"} not found`
-      });
-    }
-
-    // Check if item is deleted
-    if (item.isDeleted) {
-      return res.status(400).json({
-        success: false,
-        message: "Cannot star deleted items"
-      });
-    }
-
-    // Check if already starred
-    if (item.starred) {
-      return res.status(200).json({
-        success: true,
-        message: `${sanitizedType === "folder" ? "Folder" : "File"} is already starred`,
-        data: {
-          id: item._id,
-          name: item.name || item.displayName,
-          type: sanitizedType,
-          starred: item.starred
-        }
-      });
-    }
-
-    // Set starred to true
-    item.starred = true;
-    item.updatedBy = req.user.id;
-    await item.save();
+    // Add to starred using StarredModel
+    const starred = await StarredModel.addStarred(
+      user._id,
+      resource._id,
+      resourceType,
+      resource.departmentId,
+      resource.parentId
+    );
 
     res.status(200).json({
       success: true,
-      message: `${sanitizedType === "folder" ? "Folder" : "File"} starred successfully`,
+      message: `${type} added to starred successfully`,
       data: {
-        id: item._id,
-        name: item.name || item.displayName,
-        type: sanitizedType,
-        starred: item.starred
-      }
+        id: resource._id,
+        name: resource.name || resource.displayName,
+        type: type.toLowerCase(),
+        starred: true,
+        starredAt: starred.starredAt,
+      },
     });
   } catch (error) {
     next(error);
@@ -98,56 +59,33 @@ export const addStarred = async (req, res, next) => {
 };
 
 /**
- * Set starred status to false for a single item
- * @route POST /api/v1/starred/remove
- * @body { id: string, type: "folder" | "file" }
+ * ============================================
+ * REMOVE ITEM FROM STARRED
+ * ============================================
+ * @route   POST /api/starred/remove
+ * @access  Private - Middleware validates 'view' permission
+ * @body    { id: string, type: "folder" | "file" }
+ * @note    req.resource and req.resourceType attached by middleware
  */
 export const removeStarred = async (req, res, next) => {
   try {
-    // Validate request
-    const parsed = toggleStarredSchema.safeParse({ body: req.body });
-    validateRequest(parsed);
+    const user = req.user;
+    const resource = req.resource; // Attached by middleware
+    const resourceType = req.resourceType; // Attached by middleware
+    const { type } = req.body;
 
-    const { id, type } = parsed.data.body;
-    
-    // Sanitize inputs
-    const sanitizedId = sanitizeAndValidateId(id, "Item ID");
-    const sanitizedType = sanitizeInput(type);
-
-    let item;
-    let Model;
-
-    // Get the appropriate model
-    if (sanitizedType === "folder") {
-      Model = FolderModel;
-    } else {
-      Model = DocumentModel;
-    }
-
-    // Find the item
-    item = await Model.findById(sanitizedId);
-
-    if (!item) {
-      return res.status(404).json({
-        success: false,
-        message: `${sanitizedType === "folder" ? "Folder" : "File"} not found`
-      });
-    }
-
-    // Set starred to false
-    item.starred = false;
-    item.updatedBy = req.user.id;
-    await item.save();
+    // Remove from starred using StarredModel
+    await StarredModel.removeStarred(user._id, resource._id, resourceType);
 
     res.status(200).json({
       success: true,
-      message: `${sanitizedType === "folder" ? "Folder" : "File"} unstarred successfully`,
+      message: `${type} removed from starred successfully`,
       data: {
-        id: item._id,
-        name: item.name || item.displayName,
-        type: sanitizedType,
-        starred: item.starred
-      }
+        id: resource._id,
+        name: resource.name || resource.displayName,
+        type: type.toLowerCase(),
+        starred: false,
+      },
     });
   } catch (error) {
     next(error);
@@ -155,13 +93,16 @@ export const removeStarred = async (req, res, next) => {
 };
 
 /**
- * Bulk update starred status for multiple items
- * @route POST /api/v1/starred/bulk
- * @body { fileIds: string[], folderIds: string[], starred: boolean }
+ * ============================================
+ * BULK UPDATE STARRED STATUS
+ * ============================================
+ * @route   POST /api/starred/bulk
+ * @access  Private - Controller validates 'view' permission on all items
+ * @body    { fileIds: string[], folderIds: string[], starred: boolean }
  */
 export const bulkUpdateStarred = async (req, res, next) => {
   try {
-    // Validate request
+    const user = req.user;
     const parsed = bulkStarredSchema.safeParse({ body: req.body });
     validateRequest(parsed);
 
@@ -169,32 +110,30 @@ export const bulkUpdateStarred = async (req, res, next) => {
 
     // Validate that at least one array has items
     if (fileIds.length === 0 && folderIds.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "At least one file or folder ID must be provided"
-      });
+      throw createHttpError(400, "At least one file or folder ID must be provided");
     }
 
     // Sanitize IDs
     const sanitizedFileIds = fileIds.map(id => sanitizeAndValidateId(id, "File ID"));
     const sanitizedFolderIds = folderIds.map(id => sanitizeAndValidateId(id, "Folder ID"));
 
-    const userId = req.user.id;
+    const userGroupIds = user.groups || [];
     const results = {
-      files: { updated: 0, notFound: [], alreadySet: [], deleted: [] },
-      folders: { updated: 0, notFound: [], alreadySet: [], deleted: [] }
+      files: { updated: 0, notFound: [], noPermission: [], deleted: [] },
+      folders: { updated: 0, notFound: [], noPermission: [], deleted: [] },
     };
 
-    // Update files
+    const itemsToUpdate = []; // Items that passed validation
+
+    // Process files
     if (sanitizedFileIds.length > 0) {
       const files = await DocumentModel.find({
         _id: { $in: sanitizedFileIds },
-        createdBy: userId
       });
 
       for (const fileId of sanitizedFileIds) {
         const file = files.find(f => f._id.toString() === fileId);
-        
+
         if (!file) {
           results.files.notFound.push(fileId);
           continue;
@@ -205,28 +144,41 @@ export const bulkUpdateStarred = async (req, res, next) => {
           continue;
         }
 
-        if (file.starred === starred) {
-          results.files.alreadySet.push(fileId);
+        // Check if user has 'view' permission
+        const canView = await hasPermission(
+          user,
+          file,
+          "DOCUMENT",
+          "view",
+          userGroupIds
+        );
+
+        if (!canView) {
+          results.files.noPermission.push(fileId);
           continue;
         }
 
-        file.starred = starred;
-        file.updatedBy = userId;
-        await file.save();
+        // Add to items to update
+        itemsToUpdate.push({
+          itemId: file._id,
+          itemType: "DOCUMENT",
+          departmentId: file.departmentId,
+          parentId: file.parentId,
+        });
+
         results.files.updated++;
       }
     }
 
-    // Update folders
+    // Process folders
     if (sanitizedFolderIds.length > 0) {
       const folders = await FolderModel.find({
         _id: { $in: sanitizedFolderIds },
-        createdBy: userId
       });
 
       for (const folderId of sanitizedFolderIds) {
         const folder = folders.find(f => f._id.toString() === folderId);
-        
+
         if (!folder) {
           results.folders.notFound.push(folderId);
           continue;
@@ -237,15 +189,40 @@ export const bulkUpdateStarred = async (req, res, next) => {
           continue;
         }
 
-        if (folder.starred === starred) {
-          results.folders.alreadySet.push(folderId);
+        // Check if user has 'view' permission
+        const canView = await hasPermission(
+          user,
+          folder,
+          "FOLDER",
+          "view",
+          userGroupIds
+        );
+
+        if (!canView) {
+          results.folders.noPermission.push(folderId);
           continue;
         }
 
-        folder.starred = starred;
-        folder.updatedBy = userId;
-        await folder.save();
+        // Add to items to update
+        itemsToUpdate.push({
+          itemId: folder._id,
+          itemType: "FOLDER",
+          departmentId: folder.departmentId,
+          parentId: folder.parentId,
+        });
+
         results.folders.updated++;
+      }
+    }
+
+    // Perform bulk update in StarredModel
+    if (itemsToUpdate.length > 0) {
+      if (starred) {
+        // Add all validated items to starred
+        await StarredModel.bulkAddStarred(user._id, itemsToUpdate);
+      } else {
+        // Remove all validated items from starred
+        await StarredModel.bulkRemoveStarred(user._id, itemsToUpdate);
       }
     }
 
@@ -254,13 +231,13 @@ export const bulkUpdateStarred = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      message: `Bulk ${starred ? 'starred' : 'unstarred'} operation completed`,
+      message: `Bulk ${starred ? "starred" : "unstarred"} operation completed`,
       data: {
         totalRequested,
         totalUpdated,
         starred,
-        results
-      }
+        results,
+      },
     });
   } catch (error) {
     next(error);
@@ -268,91 +245,93 @@ export const bulkUpdateStarred = async (req, res, next) => {
 };
 
 /**
- * Get all starred items for current user
- * @route GET /api/v1/starred
+ * ============================================
+ * GET ALL STARRED ITEMS
+ * ============================================
+ * @route   GET /api/starred
+ * @access  Private
+ * @note    Returns only items user still has access to
+ * @note    Uses same format as getChildFolders for consistent UI
  */
 export const getStarredItems = async (req, res, next) => {
   try {
-    console.log("calling");
-    const userId = req.user.id;
+    const user = req.user;
+    const userGroupIds = user.groups || [];
 
-    const populateFields = "username email";
+    // Get all starred items for user
+    const starredItems = await StarredModel.getStarredForUser(user._id);
 
-    // Get starred folders and files
-    const [starredFolders, starredFiles] = await Promise.all([
+    // Separate folder and document IDs
+    const folderIds = starredItems
+      .filter(item => item.itemType === "FOLDER")
+      .map(item => item.itemId);
+
+    const documentIds = starredItems
+      .filter(item => item.itemType === "DOCUMENT")
+      .map(item => item.itemId);
+
+    // Fetch actual folders and documents with lean data
+    const [folders, documents] = await Promise.all([
       FolderModel.find({
-        starred: true,
+        _id: { $in: folderIds },
         isDeleted: false,
-        createdBy: userId,
       })
-        .select(
-          "name type path color starred createdAt updatedAt parent_id createdBy"
-        )
-        .populate("createdBy", populateFields),
+        .populate("createdBy", "username email")
+        .populate("updatedBy", "username email")
+        .sort({ createdAt: -1 })
+        .lean(), 
 
       DocumentModel.find({
-        starred: true,
+        _id: { $in: documentIds },
         isDeleted: false,
-        createdBy: userId,
       })
-        .select(
-          "name displayName type mimeType extension size starred createdAt updatedAt parent_id createdBy"
-        )
-        .populate("createdBy", populateFields),
+        .populate("createdBy", "username email")
+        .populate("updatedBy", "username email")
+        .sort({ createdAt: -1 })
+        .lean(), // ✅ Lean for performance
     ]);
 
-    // Format response
-    const folders = starredFolders.map((folder) => ({
-      id: folder._id,
-      name: folder.name,
-      type: "folder",
-      itemType: "folder",
-      color: folder.color,
-      path: folder.path,
-      starred: folder.starred,
-      createdAt: folder.createdAt,
-      updatedAt: folder.updatedAt,
-      parent_id: folder.parent_id,
-      createdBy: {
-        id: folder.createdBy?._id,
-        username: folder.createdBy?.username,
-        email: folder.createdBy?.email,
-      },
-    }));
+    // Combine all items
+    let allItems = [...folders, ...documents];
 
-    const files = starredFiles.map((file) => ({
-      id: file._id,
-      name: file.displayName || file.name,
-      type: "file",
-      itemType: "file",
-      mimeType: file.mimeType || file.type,
-      extension: file.extension,
-      size: file.size,
-      starred: file.starred,
-      createdAt: file.createdAt,
-      updatedAt: file.updatedAt,
-      parent_id: file.parent_id,
-      createdBy: {
-        id: file.createdBy?._id,
-        username: file.createdBy?.username,
-        email: file.createdBy?.email,
-      },
-    }));
+    // Filter: Keep only items user has view access to
+    const accessibleItems = [];
+    
+    for (const item of allItems) {
+      const resourceType = item.type === "folder" ? "FOLDER" : "DOCUMENT";
+      
+      const canView = await hasPermission(
+        user,
+        item,
+        resourceType,
+        "view",
+        userGroupIds
+      );
 
-    // Combine and sort by updatedAt
-    const allStarred = [...folders, ...files].sort(
-      (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
-    );
+      if (canView) {
+        // Find corresponding starred record for starredAt timestamp
+        const starredItem = starredItems.find(
+          s => s.itemId.toString() === item._id.toString()
+        );
+        
+        // Attach starredAt to item
+        item.starredAt = starredItem?.starredAt;
+        accessibleItems.push(item);
+      }
+    }
+
+    // 📁 Sort by starredAt (most recently starred first)
+    accessibleItems.sort((a, b) => {
+      return new Date(b.starredAt) - new Date(a.starredAt);
+    });
+
+    // 🔐 Attach actions using the same helper as getChildFolders
+    const itemsWithActions = await attachActionsBulk(accessibleItems, user);
 
     res.status(200).json({
       success: true,
-      message: "Starred items retrieved successfully",
-      data: {
-        total: allStarred.length,
-        folders: folders.length,
-        files: files.length,
-        items: allStarred,
-      },
+      count: itemsWithActions.length,
+      children: itemsWithActions, // ✅ Same key as getChildFolders
     });
   } catch (error) {
     next(error);
