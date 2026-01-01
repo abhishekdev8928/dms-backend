@@ -103,6 +103,25 @@ departmentSchema.index({ path: 1 });
 departmentSchema.index({ ownerType: 1 });
 departmentSchema.index({ ownerId: 1 });
 
+// 🔥 Ensure global uniqueness for ORG departments
+departmentSchema.index(
+  { name: 1, ownerType: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { ownerType: 'ORG' } // only enforce for ORG
+  }
+);
+
+// 🔥 Ensure per-user uniqueness for USER departments (MyDrive)
+departmentSchema.index(
+  { name: 1, ownerType: 1, ownerId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { ownerType: 'USER' } // only enforce for USER
+  }
+);
+
+
 // 🔥 NEW: Compound unique index - each user can only have ONE USER-type department
 departmentSchema.index(
   { ownerType: 1, ownerId: 1 },

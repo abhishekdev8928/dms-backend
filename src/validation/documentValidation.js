@@ -438,6 +438,7 @@ export const deleteOldVersionsSchema = z.object({
 
 // ===== CHUNKED UPLOAD VALIDATION SCHEMAS =====
 
+
 /**
  * ✅ Schema for initiating chunked upload
  */
@@ -447,44 +448,16 @@ export const initiateChunkedUploadSchema = z.object({
       .min(1, 'Filename is required')
       .max(255, 'Filename cannot exceed 255 characters')
       .regex(/^[^<>:"/\\|?*\x00-\x1F]+$/, 'Filename contains invalid characters'),
-    mimeType: mimeTypeValidator,
+    mimeType: z.string()
+      .min(1, 'MIME type is required')
+      .regex(/^[a-z]+\/[a-z0-9\-\+\.]+$/i, 'Invalid MIME type format'),
     fileSize: z.number()
       .int('File size must be an integer')
       .positive('File size must be positive')
       .min(100 * 1024 * 1024, 'File size must be at least 100MB for chunked upload')
       .max(5 * 1024 * 1024 * 1024, 'File size cannot exceed 5GB'),
-    parentId: objectIdValidator
-  }).superRefine((data, ctx) => {
-    const ext = data.filename.split('.').pop()?.toLowerCase() || '';
-    const validation = validateFile(`.${ext}`, data.mimeType);
-    
-    if (!validation.valid) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: validation.reason,
-        path: ['filename']
-      });
-    }
-  })
-});
-
-/**
- * ✅ Schema for uploading a chunk
- */
-export const uploadChunkSchema = z.object({
-  body: z.object({
-    uploadId: z.string()
-      .min(1, 'Upload ID is required'),
-    key: z.string()
-      .min(1, 'S3 key is required'),
-    partNumber: z.number()
-      .int('Part number must be an integer')
-      .min(1, 'Part number must be at least 1')
-      .max(10000, 'Part number cannot exceed 10000'),
-    body: z.union([
-      z.instanceof(Buffer),
-      z.string() // base64 encoded
-    ])
+    parentId: z.string()
+      .regex(/^[0-9a-fA-F]{24}$/, 'Invalid parent ID format')
   })
 });
 
@@ -510,8 +483,11 @@ export const completeChunkedUploadSchema = z.object({
       .min(1, 'Document name is required')
       .max(255, 'Document name cannot exceed 255 characters')
       .trim(),
-    parentId: objectIdValidator,
-    mimeType: mimeTypeValidator.optional(),
+    parentId: z.string()
+      .regex(/^[0-9a-fA-F]{24}$/, 'Invalid parent ID format'),
+    mimeType: z.string()
+      .regex(/^[a-z]+\/[a-z0-9\-\+\.]+$/i, 'Invalid MIME type format')
+      .optional(),
     fileSize: z.number()
       .int('File size must be an integer')
       .positive('File size must be positive')

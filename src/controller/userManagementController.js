@@ -137,14 +137,16 @@ export const createUserBySuperAdmin = async (req, res, next) => {
     });
 
     // 🔥 Create MyDrive department
-    const myDrive = await DepartmentModel.create({
-      name: `MyDrive_${user._id}`,
-      description: `Personal drive for ${user.username}`,
-      ownerType: "USER",
-      ownerId: user._id,
-      createdBy: currentUserId,
-      isActive: true,
-    });
+   // 🔥 Create MyDrive department for the user
+const myDrive = await DepartmentModel.create({
+  name: "My Drive",            // just "MyDrive", uniqueness is per user
+  description: `Personal drive for ${user.username}`,
+  ownerType: "USER",
+  ownerId: user._id,
+  createdBy: currentUserId,
+  isActive: true,
+  isMyDrive: true             // optional flag
+});
 
     // 🔥 Link MyDrive to user
     user.myDriveDepartmentId = myDrive._id;

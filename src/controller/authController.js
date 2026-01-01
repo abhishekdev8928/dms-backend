@@ -32,6 +32,7 @@ import DepartmentModel from "../models/departmentModel.js";
  * @access  Public
  */
 export const registerUser = async (req, res, next) => {
+  let user; // for rollback safety
   try {
     const parsedData = registerSchema.safeParse(req.body);
     validateRequest(parsedData);
@@ -48,7 +49,6 @@ export const registerUser = async (req, res, next) => {
       throw createHttpError(400, "User with this email already exists");
     }
 
-    // Check username uniqueness
     const existingUsername = await UserModel.findOne({ username: sanitizedUsername });
     if (existingUsername) {
       throw createHttpError(400, "Username is already taken");
@@ -59,15 +59,30 @@ export const registerUser = async (req, res, next) => {
     const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Create new user
-    const user = await UserModel.create({
+    user = await UserModel.create({
       username: sanitizedUsername,
       email: sanitizedEmail,
       password,
-      role: role,
+      role: role || "USER",
       departments: departments || [],
       otp,
       otpExpires,
     });
+
+    // 🔥 Create MyDrive department for the user
+    const myDrive = await DepartmentModel.create({
+      name: "My Drive",              // just "MyDrive", uniqueness enforced per user
+      description: `Personal drive for ${user.username}`,
+      ownerType: "USER",
+      ownerId: user._id,
+      createdBy: user._id,          // user is creator
+      isActive: true,
+      isMyDrive: true               // optional flag
+    });
+
+    // 🔥 Link MyDrive to user
+    user.myDriveDepartmentId = myDrive._id;
+    await user.save();
 
     // Send OTP email
     await sendOTPEmail(user.email, user.username, otp, 10);
@@ -75,12 +90,23 @@ export const registerUser = async (req, res, next) => {
     return res.status(201).json({
       success: true,
       message: "User registered successfully. Please check your email for OTP.",
-      data: { userId: user._id },
+      data: {
+        userId: user._id,
+        username: user.username,
+        email: user.email,
+        myDriveDepartmentId: myDrive._id,
+        assignedDepartments: user.departments,
+      },
     });
   } catch (error) {
+    // 🔥 Rollback user creation if MyDrive fails
+    if (error && user) {
+      await UserModel.findByIdAndDelete(user._id);
+    }
     next(error);
   }
 };
+
 
 
 

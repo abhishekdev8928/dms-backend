@@ -24,8 +24,9 @@ const _config = {
   
   chunkedUpload: {
     threshold: parseInt(process.env.CHUNK_SIZE_THRESHOLD) || 100 * 1024 * 1024, // 100MB default
-    minChunkSize: parseInt(process.env.MIN_CHUNK_SIZE) || 5 * 1024 * 1024, // 5MB default
-    maxChunkSize: parseInt(process.env.MAX_CHUNK_SIZE) || 100 * 1024 * 1024, // 100MB default
+    minChunkSize: parseInt(process.env.MIN_CHUNK_SIZE) || 41943040, // 40 MB
+maxChunkSize: parseInt(process.env.MAX_CHUNK_SIZE) || 100 * 1024 * 1024, // 100MB default
+
   },
 
   aws: {

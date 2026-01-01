@@ -13,7 +13,6 @@ import createHttpError from 'http-errors';
 import { validateRequest } from '../utils/helper.js';
 import {
   initiateChunkedUploadSchema,
-  uploadChunkSchema,
   completeChunkedUploadSchema,
   abortChunkedUploadSchema
 } from '../validation/documentValidation.js';
@@ -41,38 +40,39 @@ export const shouldUseChunkedUpload = (fileSize) => {
 };
 
 /**
- * Calculate optimal chunk size and total parts
+ * Calculate optimal chunk size and total parts dynamically
  * @param {number} fileSize - Total file size in bytes
  * @returns {{ chunkSize: number, totalParts: number }}
  */
 export const calculateChunkDetails = (fileSize) => {
-  // S3 allows max 10,000 parts
-  const maxParts = 10000;
-  
-  let chunkSize = MIN_CHUNK_SIZE;
+  const MIN_CHUNK_SIZE = config.chunkedUpload.minChunkSize;
+  const MAX_CHUNK_SIZE = config.chunkedUpload.maxChunkSize;
+  const MAX_PARTS = 10000;
+
+  // Step 1: Target ~40 chunks by default (can adjust based on threshold if needed)
+  let targetChunkSize = Math.ceil(fileSize / 40);
+
+  // Step 2: Clamp chunk size between min and max
+  let chunkSize = Math.max(MIN_CHUNK_SIZE, Math.min(targetChunkSize, MAX_CHUNK_SIZE));
+
+  // Step 3: Calculate total parts
   let totalParts = Math.ceil(fileSize / chunkSize);
-  
-  // If we exceed max parts, increase chunk size
-  if (totalParts > maxParts) {
-    chunkSize = Math.ceil(fileSize / maxParts);
+
+  // Step 4: Ensure we don’t exceed S3 max parts
+  if (totalParts > MAX_PARTS) {
+    chunkSize = Math.ceil(fileSize / MAX_PARTS);
     totalParts = Math.ceil(fileSize / chunkSize);
   }
-  
-  // Cap chunk size at MAX_CHUNK_SIZE
-  if (chunkSize > MAX_CHUNK_SIZE) {
-    chunkSize = MAX_CHUNK_SIZE;
-    totalParts = Math.ceil(fileSize / chunkSize);
-  }
-  
+
   return { chunkSize, totalParts };
 };
 
 // ============================================
-// 🚀 INITIATE CHUNKED UPLOAD
+// 🚀 INITIATE CHUNKED UPLOAD (FIXED WITH PRESIGNED URLS)
 // ============================================
 
 /**
- * Initiate multipart upload on S3
+ * Initiate multipart upload on S3 and generate presigned URLs
  * @route POST /api/documents/chunked/initiate
  * @access Private - canCreate middleware (checks 'upload' on parentId)
  */
@@ -122,6 +122,28 @@ export const initiateChunkedUpload = async (req, res, next) => {
       throw createHttpError(500, 'Failed to initiate multipart upload');
     }
 
+    // ✨ GENERATE PRESIGNED URLS FOR ALL PARTS
+    console.log(`Generating ${totalParts} presigned URLs...`);
+    const presignedUrls = [];
+    
+    for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+      const uploadCommand = new UploadPartCommand({
+        Bucket: BUCKET_NAME,
+        Key: key,
+        UploadId: response.UploadId,
+        PartNumber: partNumber,
+      });
+
+      const url = await getSignedUrl(s3Client, uploadCommand, { expiresIn: 3600 }); // 1 hour
+      
+      presignedUrls.push({
+        partNumber,
+        url
+      });
+    }
+
+    console.log(`✅ Generated ${presignedUrls.length} presigned URLs successfully`);
+
     res.status(200).json({
       success: true,
       data: {
@@ -129,118 +151,9 @@ export const initiateChunkedUpload = async (req, res, next) => {
         key: key,
         chunkSize: chunkSize,
         totalParts: totalParts,
-        message: 'Chunked upload initiated successfully',
-      },
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-// ============================================
-// 📤 UPLOAD SINGLE CHUNK
-// ============================================
-
-/**
- * Upload a single part/chunk to S3
- * @route POST /api/documents/chunked/upload
- * @access Private
- */
-export const uploadChunk = async (req, res, next) => {
-  try {
-    // ✅ VALIDATE REQUEST
-    const parsed = uploadChunkSchema.safeParse({ body: req.body });
-    const validatedData = validateRequest(parsed);
-    
-    const { uploadId, key, partNumber, body } = validatedData.body;
-
-    // Body should be Buffer or base64 string
-    let chunkData;
-    if (Buffer.isBuffer(body)) {
-      chunkData = body;
-    } else if (typeof body === 'string') {
-      // Assume base64 encoded
-      chunkData = Buffer.from(body, 'base64');
-    } else {
-      throw createHttpError(400, 'Invalid chunk data format');
-    }
-
-    // Validate chunk size (min 5MB except last part)
-    if (chunkData.length < MIN_CHUNK_SIZE && partNumber < 10000) {
-      console.warn(`Warning: Chunk ${partNumber} is smaller than recommended 5MB`);
-    }
-
-    // Upload part to S3
-    const command = new UploadPartCommand({
-      Bucket: BUCKET_NAME,
-      Key: key,
-      UploadId: uploadId,
-      PartNumber: partNumber,
-      Body: chunkData,
-    });
-
-    const response = await s3Client.send(command);
-
-    if (!response.ETag) {
-      throw createHttpError(500, 'Failed to upload chunk');
-    }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        ETag: response.ETag,
-        PartNumber: partNumber,
-        message: `Chunk ${partNumber} uploaded successfully`,
-      },
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-// ============================================
-// 📤 GENERATE PRESIGNED URL FOR CHUNK UPLOAD (Alternative)
-// ============================================
-
-/**
- * Generate presigned URL for client-side chunk upload
- * This allows frontend to upload directly to S3 without sending data through server
- * @route POST /api/documents/chunked/generate-upload-url
- * @access Private
- */
-export const generateChunkUploadUrl = async (req, res, next) => {
-  try {
-    const { uploadId, key, partNumber } = req.body;
-
-    // Validate required fields
-    if (!uploadId || !key || !partNumber) {
-      throw createHttpError(400, 'Missing required fields: uploadId, key, partNumber');
-    }
-
-    // Validate part number
-    const partNum = parseInt(partNumber);
-    if (isNaN(partNum) || partNum < 1 || partNum > 10000) {
-      throw createHttpError(400, 'Invalid part number');
-    }
-
-    // Create command for presigned URL
-    const command = new UploadPartCommand({
-      Bucket: BUCKET_NAME,
-      Key: key,
-      UploadId: uploadId,
-      PartNumber: partNum,
-    });
-
-    // Generate presigned URL (valid for 1 hour)
-    const url = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
-
-    res.status(200).json({
-      success: true,
-      data: {
-        url: url,
-        partNumber: partNum,
-        expiresIn: 3600,
-        message: 'Presigned URL generated for chunk upload',
+        presignedUrls: presignedUrls, // ✨ Client uploads directly to S3
+        expiresIn: 3600, // URLs valid for 1 hour
+        message: 'Chunked upload initiated with presigned URLs',
       },
     });
   } catch (error) {
@@ -274,6 +187,8 @@ export const completeChunkedUpload = async (req, res, next) => {
       }))
       .sort((a, b) => a.PartNumber - b.PartNumber);
 
+    console.log(`Completing upload with ${sortedParts.length} parts...`);
+
     // Complete multipart upload on S3
     const command = new CompleteMultipartUploadCommand({
       Bucket: BUCKET_NAME,
@@ -289,6 +204,8 @@ export const completeChunkedUpload = async (req, res, next) => {
     if (!response.Location) {
       throw createHttpError(500, 'Failed to complete multipart upload');
     }
+
+    console.log(`✅ Upload completed: ${response.Location}`);
 
     // Extract file metadata
     const extension = name.split('.').pop().toLowerCase();
@@ -327,6 +244,7 @@ export const completeChunkedUpload = async (req, res, next) => {
       },
     });
   } catch (error) {
+    console.error('Error completing chunked upload:', error);
     next(error);
   }
 };
@@ -348,6 +266,8 @@ export const abortChunkedUpload = async (req, res, next) => {
     
     const { uploadId, key } = validatedData.body;
 
+    console.log(`Aborting upload: ${uploadId}`);
+
     // Abort multipart upload on S3
     const command = new AbortMultipartUploadCommand({
       Bucket: BUCKET_NAME,
@@ -357,11 +277,14 @@ export const abortChunkedUpload = async (req, res, next) => {
 
     await s3Client.send(command);
 
+    console.log(`✅ Upload aborted successfully`);
+
     res.status(200).json({
       success: true,
       message: 'Chunked upload aborted and cleaned up successfully',
     });
   } catch (error) {
+    console.error('Error aborting chunked upload:', error);
     next(error);
   }
 };
@@ -414,7 +337,9 @@ export const listUploadedParts = async (req, res, next) => {
   }
 };
 
-
+// ============================================
+// 📤 EXPORTS
+// ============================================
 
 export const chunkedUploadUtils = {
   shouldUseChunkedUpload,

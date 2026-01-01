@@ -22,10 +22,10 @@ import {
 } from '../controller/documentController.js';
 
 import { 
-  completeChunkedUpload, 
-  abortChunkedUpload, 
-  uploadChunk, 
-  initiateChunkedUpload 
+  listUploadedParts,
+  initiateChunkedUpload,
+  completeChunkedUpload,
+  abortChunkedUpload
 } from "../controller/chunkedUploadController.js"
 
 import { authenticateUser } from '../middleware/authMiddleware.js';
@@ -74,35 +74,52 @@ router.post('/generate-upload-urls', authenticateUser, canCreate, generatePresig
 
 /**
  * @route   POST /api/documents/chunked/initiate
- * @desc    Initiate chunked upload for large files
+ * @desc    Initiate chunked upload and get presigned URLs
  * @access  Private - Requires 'upload' permission on parent folder
  * @body    { filename: string, mimeType: string, fileSize: number, parentId: string }
+ * @returns { uploadId, key, chunkSize, totalParts, presignedUrls[] }
  */
-router.post('/chunked/initiate', authenticateUser, canCreate, initiateChunkedUpload);
-
-/**
- * @route   POST /api/documents/chunked/upload
- * @desc    Upload a single chunk
- * @access  Private
- * @body    { uploadId: string, key: string, partNumber: number, chunk: Buffer }
- */
-router.post('/chunked/upload', authenticateUser, uploadChunk);
+router.post('/chunked/initiate', 
+  authenticateUser, 
+  canCreate, 
+  initiateChunkedUpload
+);
 
 /**
  * @route   POST /api/documents/chunked/complete
  * @desc    Complete chunked upload and create document
  * @access  Private - Requires 'upload' permission on parent
- * @body    { uploadId, key, parts, name, parentId, description?, tags? }
+ * @body    { uploadId, key, parts: [{ ETag, PartNumber }], name, parentId, description?, tags? }
+ * @returns { document }
  */
-router.post('/chunked/complete', authenticateUser, canCreate, completeChunkedUpload);
+router.post('/chunked/complete', 
+  authenticateUser, 
+  canCreate, 
+  completeChunkedUpload
+);
 
 /**
  * @route   POST /api/documents/chunked/abort
- * @desc    Abort chunked upload and clean up
+ * @desc    Abort chunked upload and cleanup S3
  * @access  Private
- * @body    { uploadId: string, key: string }
+ * @body    { uploadId, key }
  */
-router.post('/chunked/abort', authenticateUser, abortChunkedUpload);
+router.post('/chunked/abort', 
+  authenticateUser, 
+  abortChunkedUpload
+);
+
+/**
+ * @route   GET /api/documents/chunked/parts
+ * @desc    List already uploaded parts (for resume functionality)
+ * @access  Private
+ * @query   uploadId, key
+ * @returns { parts: [{ PartNumber, ETag, Size }] }
+ */
+router.get('/chunked/parts', 
+  authenticateUser, 
+  listUploadedParts
+);
 
 /**
  * ============================================
