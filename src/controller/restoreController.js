@@ -245,9 +245,11 @@ export const restoreItem = async (req, res, next) => {
     const FolderModelRef = mongoose.model('Folder');
     const DepartmentModel = mongoose.model('Department');
 
-    let parent = await FolderModelRef.findById(item.parent_id);
+    let parent = await FolderModelRef.findById(item.parentId);
+
+    
     if (!parent) {
-      parent = await DepartmentModel.findById(item.parent_id);
+      parent = await DepartmentModel.findById(item.parentId);
     }
 
     if (!parent) {
